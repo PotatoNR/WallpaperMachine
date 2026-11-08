@@ -1,16 +1,19 @@
 import Foundation
 
 enum AppUpdateConfiguration {
-    static let repository = "WallpaperMachine/WallpaperMachine"
+    /// Intel build note: this fork publishes its own releases, so the update checker follows
+    /// them; upstream only ships Apple silicon images.
+    static let repository = "PotatoNR/WallpaperMachine"
     static let bundleIdentifier = "app.wallpapermachine"
     static let productName = "WallpaperMachine"
     static let applicationName = productName + ".app"
     static let maximumDownloadBytes: Int64 = 1_073_741_824
 
-    /// The drag-to-install disk image `scripts/package.py` produces and the Build workflow
-    /// publishes. Renaming the product moves both sides of this contract at once.
+    /// The drag-to-install disk image `scripts/intel/make_dmg.sh` produces and this fork
+    /// publishes. Renaming one side without the other silently drops every user back to a
+    /// manual download.
     static func assetName(for version: SemanticVersion) -> String {
-        "\(productName)-\(version.display)-arm64.dmg"
+        "\(productName)-\(version.display)-intel-x86_64.dmg"
     }
 
     static var repositoryURL: URL {
@@ -52,7 +55,14 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
 
     init?(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = trimmed.hasPrefix("v") || trimmed.hasPrefix("V") ? String(trimmed.dropFirst()) : trimmed
+        var value = trimmed.hasPrefix("v") || trimmed.hasPrefix("V") ? String(trimmed.dropFirst()) : trimmed
+        // Intel build note: this fork tags releases `v1.5.6-intel.1`, where the suffix numbers
+        // the local build. Only the version the tag carries is compared.
+        if let suffix = value.range(of: "-intel.") {
+            let build = value[suffix.upperBound...]
+            guard !build.isEmpty, build.allSatisfy(\.isNumber) else { return nil }
+            value = String(value[..<suffix.lowerBound])
+        }
         let parts = value.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3,
               parts.allSatisfy({ $0.allSatisfy(\.isNumber) && ($0 == "0" || !$0.hasPrefix("0")) }),

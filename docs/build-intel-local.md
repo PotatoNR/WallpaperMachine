@@ -66,6 +66,10 @@ relocatable. Without it the renderer fails with `required vulkan instance extens
 - glslang, SPIRV-Tools and quickjs-ng are built from source against the system
   libc++; the conda-forge glslang links a newer libc++ that exports symbols the
   system runtime lacks.
+- `App/Services/GitHub/AppUpdateModels.swift`: the update checker follows this fork's
+  releases (`PotatoNR/WallpaperMachine`), accepts the `v1.5.6-intel.1` tag shape and
+  expects the disk image `scripts/intel/make_dmg.sh` writes,
+  `WallpaperMachine-<version>-intel-x86_64.dmg`.
 
 ## Known gaps
 

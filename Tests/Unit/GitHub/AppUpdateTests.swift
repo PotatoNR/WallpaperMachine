@@ -13,6 +13,10 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertLessThan(SemanticVersion("0.1.0")!, SemanticVersion("0.1.1")!)
         XCTAssertLessThan(SemanticVersion("0.9.9")!, SemanticVersion("1.0.0")!)
         XCTAssertEqual(SemanticVersion("V2.0.0"), SemanticVersion("2.0.0"))
+        // Intel build note: this fork tags releases `v1.2.3-intel.2`.
+        XCTAssertEqual(SemanticVersion("v1.2.3-intel.2")?.display, "1.2.3")
+        XCTAssertNil(SemanticVersion("v1.2.3-intel."))
+        XCTAssertNil(SemanticVersion("v1.2.3-intel.beta"))
     }
 
     func testParserReadsStableReleaseAndPrefersTheArm64DiskImage() throws {
@@ -74,22 +78,22 @@ final class AppUpdateTests: XCTestCase {
     }
 
     func testPublishedArchiveNameIsTheOneTheBuildUploads() {
-        // scripts/package.py writes this name and .github/workflows/build.yml refuses
-        // to publish anything else. Renaming one side without the others silently
-        // drops every user back to a manual download.
+        // Intel build note: scripts/intel/make_dmg.sh writes this name and the fork's
+        // release has to carry the same one. Renaming one side without the other
+        // silently drops every user back to a manual download.
         XCTAssertEqual(AppUpdateConfiguration.assetName(for: SemanticVersion("1.2.3")!),
-                       "WallpaperMachine-1.2.3-arm64.dmg")
+                       "WallpaperMachine-1.2.3-intel-x86_64.dmg")
     }
 
     func testParserPrefersTheArchiveNamedForThisVersion() throws {
         let release = try GitHubReleaseParser.decode(Self.releaseJSON(
             tag: "v1.2.3",
             assets: [
-                ("WallpaperMachine-1.2.2-arm64.dmg", "https://github.com/bobbyhuang-dev/WallpaperMachine/releases/download/v1.2.3/old.dmg", 100, nil),
-                ("WallpaperMachine-1.2.3-arm64.dmg", "https://github.com/bobbyhuang-dev/WallpaperMachine/releases/download/v1.2.3/new.dmg", 300, nil)
+                ("WallpaperMachine-1.2.2-intel-x86_64.dmg", "https://github.com/bobbyhuang-dev/WallpaperMachine/releases/download/v1.2.3/old.dmg", 100, nil),
+                ("WallpaperMachine-1.2.3-intel-x86_64.dmg", "https://github.com/bobbyhuang-dev/WallpaperMachine/releases/download/v1.2.3/new.dmg", 300, nil)
             ]
         ))
-        XCTAssertEqual(GitHubReleaseParser.selectAsset(from: release)?.name, "WallpaperMachine-1.2.3-arm64.dmg")
+        XCTAssertEqual(GitHubReleaseParser.selectAsset(from: release)?.name, "WallpaperMachine-1.2.3-intel-x86_64.dmg")
     }
 
     func testChecksumSidecarIsNeverDownloadedAsAnUpdate() throws {
