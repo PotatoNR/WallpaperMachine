@@ -18,6 +18,7 @@ Everything lives in the ignored `.toolchain/` directory; nothing is installed in
 | `.toolchain/env.sh` | Exports the prefix, Rust toolchain and `PKG_CONFIG_PATH` |
 | `scripts/intel/package_intel_app.sh` | Makes the built app self-contained (see below) |
 | `scripts/intel/fetch_moltenvk.sh` | Downloads the pinned MoltenVK bottle into `.toolchain/vendor/moltenvk` |
+| `scripts/intel/make_dmg.sh` | Wraps the packaged app into the release disk image and prints its SHA-256 |
 
 Rust is the x86_64 stable toolchain under `.toolchain/cargo`; the cargo registry
 mirror is in `.toolchain/cargo/config.toml`.
@@ -29,6 +30,7 @@ source .toolchain/env.sh
 python3 scripts/build.py --configuration Release
 scripts/intel/fetch_moltenvk.sh   # once, needs network
 scripts/intel/package_intel_app.sh
+scripts/intel/make_dmg.sh         # artifacts/intel-release/WallpaperMachine-<version>-intel-x86_64.dmg
 ```
 
 `build.py` builds the renderer with Cargo, regenerates `App/Bridge/Generated/`,
