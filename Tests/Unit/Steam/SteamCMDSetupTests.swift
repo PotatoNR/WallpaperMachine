@@ -791,12 +791,12 @@ final class SteamCMDSetupTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: record.path))
     }
 
-    func testIntelOnlyManagedCopyReportsNativeReinstall() async throws {
+    func testForeignArchitectureManagedCopyReportsNativeReinstall() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let binary = try fixture.oldRuntime()
         var header = Data()
-        for word: UInt32 in [0xfeedfacf, SteamCMDArchitecture.x86_64, 3, 2, 0, 0, 0, 0] {
+        for word: UInt32 in [0xfeedfacf, SteamCMDArchitecture.foreign, 3, 2, 0, 0, 0, 0] {
             var little = word.littleEndian
             withUnsafeBytes(of: &little) { header.append(contentsOf: $0) }
         }
@@ -805,7 +805,7 @@ final class SteamCMDSetupTests: XCTestCase {
         fixture.defaults.removeObject(forKey: preferenceKey)
         let store = fixture.store(provider: ManagedNativeFixtureRuntime(root: fixture.root))
         await store.refresh()
-        guard case .failed(let issue) = store.state else { return XCTFail("Intel copy must offer reinstall") }
+        guard case .failed(let issue) = store.state else { return XCTFail("A foreign-architecture copy must offer reinstall") }
         XCTAssertEqual(issue.kind, .appleSiliconRequired)
         XCTAssertNil(store.selectedRuntime)
     }

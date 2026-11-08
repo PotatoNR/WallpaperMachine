@@ -30,10 +30,31 @@ enum SteamCMDArchitecture {
     static let arm64: UInt32 = 0x0100_000c
     static let x86_64: UInt32 = 0x0100_0007
 
-    /// Selects only arm64 slices; an image without one fails with EBADARCH instead of being
+    /// The CPU type this build of the app runs as. The shipped app is Apple silicon code, so
+    /// SteamCMD has to carry an arm64 slice; the Intel (x86_64) build runs x86_64 natively and
+    /// must accept Valve's Intel SteamCMD instead of rejecting it as translated.
+    static var native: UInt32 {
+        #if arch(x86_64)
+        x86_64
+        #else
+        arm64
+        #endif
+    }
+
+    /// The other slice: what an image built for the shipped Apple silicon app carries on this
+    /// machine, and therefore the one a cross-architecture install test can rely on.
+    static var foreign: UInt32 {
+        #if arch(x86_64)
+        arm64
+        #else
+        x86_64
+        #endif
+    }
+
+    /// Selects only native slices; an image without one fails with EBADARCH instead of being
     /// translated. Subtype ANY keeps arm64e system tools such as tar and codesign launchable.
     static func requireNative(_ attributes: inout posix_spawnattr_t?) -> Int32 {
-        var types = [cpu_type_t(bitPattern: arm64)]
+        var types = [cpu_type_t(bitPattern: native)]
         var subtypes = [cpu_subtype_t(-1)]  // CPU_SUBTYPE_ANY
         var count = 0
         return posix_spawnattr_setarchpref_np(&attributes, 1, &types, &subtypes, &count)
@@ -128,9 +149,14 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
             let type = metadata.st_mode & S_IFMT
             if type == S_IFLNK {
                 var link = [UInt8](repeating: 0, count: Int(PATH_MAX) + 1)
-                let count = readlinkat(parent, name, &link, link.count)
+                // Pass the buffer explicitly: `readlinkat(…, &link, link.count)` miscompiles on
+                // x86_64 with Swift 6.1 (the array's count reads as garbage and the process dies
+                // with SIGSEGV), so keep the inout-to-pointer conversion out of this call.
+                let count = link.withUnsafeMutableBytes { buffer in
+                    readlinkat(parent, name, buffer.baseAddress!.assumingMemoryBound(to: CChar.self), buffer.count)
+                }
                 guard count > 0, count < link.count,
-                      let target = String(bytes: link.prefix(count), encoding: .utf8) else { throw approvalFailure() }
+                      let target = String(bytes: link[0..<count], encoding: .utf8) else { throw approvalFailure() }
                 field(target)
                 // Framework links carry no executable bytes. Never mutate or follow them;
                 // their contained regular-file targets are independently hashed and cleared.
@@ -295,7 +321,7 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
               FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw issue(.invalidSelection, "\(binary.path) is not a macOS Mach-O SteamCMD executable.")
         }
-        guard images.contains(where: { $0.cpu == SteamCMDArchitecture.arm64 }) else {
+        guard images.contains(where: { $0.cpu == SteamCMDArchitecture.native }) else {
             throw appleSiliconIssue(binary)
         }
         return SteamCMDRuntime(rootURL: root, executableURL: binary)
@@ -378,10 +404,10 @@ struct SteamCMDRuntimeService: SteamCMDRuntimeProviding, SteamCMDRuntimeApprovin
                 throw issue(.incompleteRuntime, "\(name) is not a valid Mach-O runtime component.")
             }
         }
-        // Any image without arm64 code could only ever run translated, so the whole copy is
-        // treated as an Intel build that a native reinstall replaces.
+        // Any image without native code could only ever run translated, so the whole copy is
+        // treated as a foreign-architecture build that a native reinstall replaces.
         if let intel = binaries.keys.sorted(by: { $0.path < $1.path }).first(where: { binary in
-            !(binaries[binary] ?? []).contains { $0.cpu == SteamCMDArchitecture.arm64 }
+            !(binaries[binary] ?? []).contains { $0.cpu == SteamCMDArchitecture.native }
         }) {
             throw appleSiliconIssue(intel)
         }
