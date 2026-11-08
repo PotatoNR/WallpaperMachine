@@ -4653,7 +4653,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = arm64;
+				ARCHS = x86_64;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
@@ -4733,16 +4733,11 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/upstream/renderer/target/release",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
-					/opt/homebrew/opt/glslang/lib,
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				MARKETING_VERSION = 1.5.6;
 				OTHER_LDFLAGS = (
@@ -4901,16 +4896,11 @@
 				INFOPLIST_FILE = App/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/upstream/renderer/target/release",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
-					/opt/homebrew/opt/glslang/lib,
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				MARKETING_VERSION = 1.5.6;
 				OTHER_LDFLAGS = (
@@ -4971,16 +4961,11 @@
 				INFOPLIST_FILE = App/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/upstream/renderer/target/release",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
-					/opt/homebrew/opt/glslang/lib,
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				MARKETING_VERSION = 1.5.6;
 				OTHER_LDFLAGS = (
@@ -5042,16 +5027,11 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/upstream/renderer/target/release",
-					"/opt/homebrew/opt/mwe-ffmpeg/lib",
-					/opt/homebrew/lib,
-					"/opt/homebrew/opt/quickjs-ng/lib",
-					/opt/homebrew/opt/glslang/lib,
+					"$(SRCROOT)/.toolchain/conda/lib",
 				);
 				MARKETING_VERSION = 1.5.6;
 				OTHER_LDFLAGS = (
@@ -5125,7 +5105,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = arm64;
+				ARCHS = x86_64;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";

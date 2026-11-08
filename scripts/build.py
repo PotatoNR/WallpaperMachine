@@ -68,7 +68,9 @@ def build_environment():
     packages = ["quickjs-ng", "glslang", "mwe-ffmpeg", "freetype", "lz4", "vulkan-loader", "vulkan-headers", "molten-vk", "eigen", "nlohmann-json", "argparse", "shaderc", "spirv-tools", "glm"]
     roots = [str(Path(prefix) / "opt" / name) for name in packages]
     result["PATH"] = f"{prefix}/bin:" + result.get("PATH", "")
-    result["CMAKE_PREFIX_PATH"] = ";".join(roots + [prefix])
+    # CMake reads the CMAKE_PREFIX_PATH *environment* variable as a PATH-style
+    # (colon-separated) list; a ";"-joined value is one unusable entry to CMake 4.x.
+    result["CMAKE_PREFIX_PATH"] = ":".join(roots + [prefix])
     result["PKG_CONFIG_PATH"] = ":".join(str(Path(p) / "lib/pkgconfig") for p in roots)
     result["OWE_NIX_LIBRARY_PATH"] = ":".join(str(Path(p) / "lib") for p in roots) + f":{prefix}/lib"
     result["LIBCLANG_PATH"] = subprocess.check_output(["xcode-select", "-p"], text=True).strip() + "/Toolchains/XcodeDefault.xctoolchain/usr/lib"
