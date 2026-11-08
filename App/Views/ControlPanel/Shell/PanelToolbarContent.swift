@@ -58,7 +58,9 @@ extension ToolbarContent {
   @ToolbarContentBuilder
   fileprivate func withoutSharedBackground() -> some ToolbarContent {
     if #available(macOS 26.0, *) {
-      sharedBackgroundVisibility(.hidden)
+      // Intel build note: sharedBackgroundVisibility exists only in the macOS 26
+      // SDK; the x86_64 build falls back to the plain toolbar item on every OS.
+      self
     } else {
       self
     }

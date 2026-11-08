@@ -46,7 +46,11 @@ private struct FloatingSidebarBackground: ViewModifier {
   func body(content: Content) -> some View {
     let shape = RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
     if #available(macOS 26.0, *) {
-      content.clipShape(shape).glassEffect(.regular, in: shape)
+      // Intel build note: glassEffect exists only in the macOS 26 SDK, which the
+      // x86_64 build cannot use (Xcode 16.4 / SDK 15.5). The material panel below
+      // is the same fallback every pre-26 system renders; on macOS 26 the branch
+      // simply loses the glass tint.
+      content.clipShape(shape).background(.regularMaterial, in: shape)
     } else {
       content.clipShape(shape).background(.regularMaterial, in: shape)
     }

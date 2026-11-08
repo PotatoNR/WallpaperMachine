@@ -58,7 +58,9 @@ private struct FilterSidebarToggle: View {
 private struct SidebarToggleStyle: ViewModifier {
   func body(content: Content) -> some View {
     if #available(macOS 26.0, *) {
-      content.buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.large)
+      // Intel build note: buttonStyle(.glass) exists only in the macOS 26 SDK;
+      // the borderless button below is what every pre-26 system renders anyway.
+      content.buttonStyle(.borderless)
     } else {
       content.buttonStyle(.borderless)
     }
