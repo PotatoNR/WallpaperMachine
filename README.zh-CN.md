@@ -2,6 +2,10 @@
      (App/Resources/Localizable.xcstrings) and the website's /zh/ pages. The Supporter list between the markers is written by scripts/update_sponsors.py, as in README.md. -->
 <p align="center"><sub><a href="README.md">English</a>&ensp;·&ensp;<b>简体中文</b></sub></p>
 
+> **非官方 Intel（x86_64）构建。** 本 fork 的 `intel-mac` 分支在原版基础上做了 Intel 原生构建，
+> 安装包见本 fork 的[发布页](https://github.com/PotatoNR/WallpaperMachine/releases)。
+> 上游 [MMFoundation/WallpaperMachine](https://github.com/MMFoundation/WallpaperMachine) 只提供 Apple 芯片版本。
+
 <a href="https://www.wallpapermachine.app/zh/">
   <img src="https://github.com/user-attachments/assets/df92d34d-b718-4d58-b8e9-b002c4915516" width="100%" alt="一台 Mac 的桌面轮流播放 WallpaperMachine 的六张动态壁纸：水波中的千咲、月球上的 Lucy、雪地里的红牛 F1 赛车、黄昏中的流萤、雨中公交站的艾莲，以及 Into The Abyss，上方是 macOS 菜单栏，下方是程序坞。">
 </a>
@@ -13,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/WallpaperMachine/WallpaperMachine?label=version&color=0a84ff" alt="最新版本"></a>
+  <a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/PotatoNR/WallpaperMachine?label=version&color=0a84ff" alt="最新版本"></a>
   <a href="https://github.com/WallpaperMachine/WallpaperMachine/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/WallpaperMachine/WallpaperMachine/version.yml?branch=main&label=build" alt="构建与发布状态"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/WallpaperMachine/WallpaperMachine?color=blue" alt="许可证：GPL-2.0"></a>
   <img src="https://img.shields.io/badge/macOS_15%2B-Apple_silicon-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Apple 芯片">
@@ -21,13 +25,13 @@
 </p>
 
 <p align="center">
-  <a href="https://www.wallpapermachine.app/download"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD_Mac_%E7%89%88-%E5%85%8D%E8%B4%B9-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="免费下载 Mac 版"></a>
+  <a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD_Mac_%E7%89%88-%E5%85%8D%E8%B4%B9-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="免费下载 Mac 版"></a>
   &ensp;
   <a href="https://www.wallpapermachine.app/zh/#app"><img src="https://img.shields.io/badge/%E5%9C%A8%E6%B5%8F%E8%A7%88%E5%99%A8%E4%B8%AD%E8%AF%95%E7%94%A8-%E5%9C%A8%E7%BA%BF%E6%BC%94%E7%A4%BA-34c759?style=for-the-badge&logo=safari&logoColor=white" height="36" alt="在浏览器中试用在线演示"></a>
 </p>
 
 <p align="center">
-  <sub>macOS 15 Sequoia 或更高版本&ensp;·&ensp;Apple 芯片（M1 或更新机型）&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">发布说明与校验和</a></sub>
+  <sub>macOS 15 Sequoia 或更高版本&ensp;·&ensp;Apple 芯片（M1 或更新机型）或 Intel（本 fork）&ensp;·&ensp;<a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest">发布说明与校验和</a></sub>
 </p>
 
 <p align="center">
@@ -55,7 +59,7 @@
 
 ## 快速开始
 
-1. **下载**最新版本的[免费磁盘映像](https://www.wallpapermachine.app/download)。
+1. **下载**最新版本的[免费磁盘映像](https://github.com/PotatoNR/WallpaperMachine/releases/latest)。
 2. **安装**：打开它，把 WallpaperMachine 拖到“应用程序”文件夹。
 3. **打开它。** 下载版暂未经过公证，macOS 会拦下首次启动：在“系统设置 → 隐私与安全性”中点按一次**仍要打开**即可。
 
@@ -143,7 +147,7 @@ Wallpaper Engine 本身是为 Windows 打造的。WallpaperMachine 是一款独�
 <details>
 <summary><b>适用于哪些 Mac？</b></summary>
 
-WallpaperMachine 为搭载 Apple 芯片（M1 或更新机型）、运行 macOS 15 Sequoia 或更高版本的 Mac 打造；动态锁屏需要 macOS 26 Tahoe 或更高版本。不支持 Intel 芯片的 Mac。
+WallpaperMachine 为搭载 Apple 芯片（M1 或更新机型）、运行 macOS 15 Sequoia 或更高版本的 Mac 打造；动态锁屏需要 macOS 26 Tahoe 或更高版本。官方版本不支持 Intel 芯片的 Mac，本 fork 另外提供了 Intel 原生构建，见页面顶部说明。
 
 </details>
 
@@ -157,7 +161,7 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>如何获取？</b></summary>
 
-签名版可以从 [GitHub 最新发布](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
+签名版可以从 [GitHub 最新发布](https://github.com/PotatoNR/WallpaperMachine/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
 
 </details>
 
@@ -184,7 +188,7 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 
 ## 开源与自行构建
 
-完整源代码就在这里。构建需要搭载 Apple 芯片的 Mac、Xcode 26（macOS 15.6 或更高版本）、用 `xcode-select` 选定的完整 Xcode，以及[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎内置在[`upstream/`](upstream) 中，而不是以子模块引入。
+完整源代码就在这里。构建需要搭载 Apple 芯片的 Mac、Xcode 26（macOS 15.6 或更高版本）、用 `xcode-select` 选定的完整 Xcode，以及[先决条件](docs/build.md#prerequisites)中列出的 Homebrew 软件包；渲染器和场景引擎内置在[`upstream/`](upstream) 中，而不是以子模块引入。在 Intel Mac 上用 Xcode 16.4 构建，见[Intel 构建说明](docs/build-intel-local.md)。
 
 ```sh
 python3 scripts/install_ffmpeg.py                  # 本项目的 LGPL FFmpeg 构建

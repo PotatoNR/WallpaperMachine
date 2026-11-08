@@ -4,6 +4,12 @@
      wallpaper credits at the end. -->
 <p align="center"><sub><b>English</b>&ensp;·&ensp;<a href="README.zh-CN.md">简体中文</a></sub></p>
 
+> **Unofficial Intel (x86_64) build.** The `intel-mac` branch of this fork builds the same app
+> natively for Intel Macs; downloads are on this fork's
+> [releases page](https://github.com/PotatoNR/WallpaperMachine/releases). Upstream
+> [MMFoundation/WallpaperMachine](https://github.com/MMFoundation/WallpaperMachine) ships
+> Apple silicon builds only.
+
 <a href="https://www.wallpapermachine.app">
   <img src="https://github.com/user-attachments/assets/df92d34d-b718-4d58-b8e9-b002c4915516" width="100%" alt="A Mac desktop cycling through six live wallpapers played by WallpaperMachine: Chisaki over rippling water, Lucy on the Moon, a Red Bull F1 car in the snow, Firefly at dusk, Ellen at a rainy bus stop and Into The Abyss, under the macOS menu bar and Dock.">
 </a>
@@ -16,7 +22,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/WallpaperMachine/WallpaperMachine?label=version&color=0a84ff" alt="Latest version"></a>
+  <a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/PotatoNR/WallpaperMachine?label=version&color=0a84ff" alt="Latest version"></a>
   <a href="https://github.com/WallpaperMachine/WallpaperMachine/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/WallpaperMachine/WallpaperMachine/version.yml?branch=main&label=build" alt="Build and release status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/WallpaperMachine/WallpaperMachine?color=blue" alt="License: GPL-2.0"></a>
   <img src="https://img.shields.io/badge/macOS_15%2B-Apple_silicon-111111?logo=apple&logoColor=white" alt="macOS 15 or later on Apple silicon">
@@ -24,13 +30,13 @@
 </p>
 
 <p align="center">
-  <a href="https://www.wallpapermachine.app/download"><img src="https://img.shields.io/badge/Download_for_Mac-free-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="Download for Mac, free"></a>
+  <a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac-free-0a84ff?style=for-the-badge&logo=apple&logoColor=white" height="36" alt="Download for Mac, free"></a>
   &ensp;
   <a href="https://www.wallpapermachine.app/#app"><img src="https://img.shields.io/badge/Try_it_in_your_browser-live_demo-34c759?style=for-the-badge&logo=safari&logoColor=white" height="36" alt="Try the live demo in your browser"></a>
 </p>
 
 <p align="center">
-  <sub>macOS 15 Sequoia or later&ensp;·&ensp;Apple silicon (M1 or later)&ensp;·&ensp;<a href="https://github.com/WallpaperMachine/WallpaperMachine/releases/latest">Release notes and checksums</a></sub>
+  <sub>macOS 15 Sequoia or later&ensp;·&ensp;Apple silicon (M1 or later) or Intel (this fork)&ensp;·&ensp;<a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest">Release notes and checksums</a></sub>
 </p>
 
 <p align="center">
@@ -61,7 +67,7 @@
 
 ## Quick start
 
-1. **Download** the [free disk image](https://www.wallpapermachine.app/download) for the latest version.
+1. **Download** the [free disk image](https://github.com/PotatoNR/WallpaperMachine/releases/latest) for the latest version.
 2. **Install**: open it and drag WallpaperMachine to Applications.
 3. **Open it.** The download isn't notarized yet, so macOS holds the first launch:
    click **Open Anyway** in System Settings → Privacy & Security, once.
@@ -191,7 +197,8 @@ wallpaper, Aurora Drift, plays without either. More in
 <summary><b>Which Macs is it built for?</b></summary>
 
 Macs with Apple silicon (M1 or later) running macOS 15 Sequoia or later. The
-animated lock screen needs macOS 26 Tahoe or later. Intel Macs aren't supported.
+animated lock screen needs macOS 26 Tahoe or later. The official build does not support
+Intel Macs; this fork adds a native Intel build, see the note at the top.
 
 </details>
 
@@ -214,7 +221,7 @@ Steam account names are replaced first.
 <summary><b>How do I get it?</b></summary>
 
 Download the signed build free from the
-[latest release](https://github.com/WallpaperMachine/WallpaperMachine/releases/latest),
+[latest release](https://github.com/PotatoNR/WallpaperMachine/releases/latest),
 or [build it from the source](#open-source-free-to-build). The build is not
 notarized, so macOS holds its first launch until you click Open Anyway in
 System Settings → Privacy & Security. The
@@ -251,7 +258,8 @@ details. Security problems are reported privately: see [SECURITY.md](SECURITY.md
 The complete source is here. It builds on a Mac with Apple silicon, Xcode 26 (macOS 15.6 or later), a
 full Xcode selected with `xcode-select` and the Homebrew packages listed under
 [Prerequisites](docs/build.md#prerequisites); the renderer and scene engine are
-vendored under [`upstream/`](upstream), not pulled in as submodules.
+vendored under [`upstream/`](upstream), not pulled in as submodules. On an Intel Mac with
+Xcode 16.4, see [the Intel build notes](docs/build-intel-local.md).
 
 ```sh
 python3 scripts/install_ffmpeg.py                  # the project's LGPL FFmpeg build
