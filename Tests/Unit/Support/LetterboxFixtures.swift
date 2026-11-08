@@ -10,7 +10,10 @@ enum LetterboxFixtures {
   /// Luma of the picture at a pixel: a smooth ramp between 100 and 240, never near black, with
   /// `seed` shifting it a little so successive frames are not identical.
   static func picture(x: Int, y: Int, width: Int, height: Int, seed: Int = 0) -> UInt8 {
-    UInt8(100 + (x * 100 / max(width, 1)) + (y * 40 / max(height, 1)) + seed % 4)
+    // The ramp is computed in `Int` and converted once: Xcode 16.4's type checker times
+    // out on the single mixed-literal expression.
+    let ramp = 100 + (x * 100 / max(width, 1)) + (y * 40 / max(height, 1)) + seed % 4
+    return UInt8(ramp)
   }
 
   /// A frame of 8-bit luma, row 0 at the top, with bars of the given pixel counts.
