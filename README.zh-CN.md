@@ -18,10 +18,9 @@
 
 <p align="center">
   <a href="https://github.com/PotatoNR/WallpaperMachine/releases/latest"><img src="https://img.shields.io/github/v/release/PotatoNR/WallpaperMachine?label=version&color=0a84ff" alt="最新版本"></a>
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/actions/workflows/version.yml"><img src="https://img.shields.io/github/actions/workflow/status/WallpaperMachine/WallpaperMachine/version.yml?branch=main&label=build" alt="构建与发布状态"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/WallpaperMachine/WallpaperMachine?color=blue" alt="许可证：GPL-2.0"></a>
-  <img src="https://img.shields.io/badge/macOS_15%2B-Apple_silicon-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Apple 芯片">
-  <a href="https://github.com/WallpaperMachine/WallpaperMachine/stargazers"><img src="https://img.shields.io/github/stars/WallpaperMachine/WallpaperMachine" alt="GitHub 星标"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/PotatoNR/WallpaperMachine?color=blue" alt="许可证：GPL-2.0"></a>
+  <img src="https://img.shields.io/badge/macOS_15%2B-Intel_x86_64-111111?logo=apple&logoColor=white" alt="macOS 15 或更高版本，Intel（x86_64）">
+  <a href="https://github.com/MMFoundation/WallpaperMachine/stargazers"><img src="https://img.shields.io/github/stars/MMFoundation/WallpaperMachine?label=upstream%20stars" alt="上游 GitHub 星标"></a>
 </p>
 
 <p align="center">
