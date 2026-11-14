@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import XCTest
 
 @testable import WallpaperMachine
@@ -66,5 +68,29 @@ final class InspectorInputTests: XCTestCase {
     XCTAssertTrue(beside(label: 300, control: 0, width: 100), "nothing beside the label to move")
     XCTAssertTrue(beside(label: 100, marks: 0, control: 40, width: 148), "no marks, one gap")
     XCTAssertFalse(beside(label: 100, marks: 0, control: 40, width: 147))
+  }
+
+  /// A row counts the same room for its mark whichever it shows, Modified, Not applied or none, so
+  /// an edit, an Apply or a Revert never moves its control from one line to the other. That holds
+  /// only while the widths the row counts are the pills' drawn widths, in every shipped language.
+  func testSwitchingBetweenModifiedNotAppliedAndNoMarkNeverMovesTheControl() {
+    addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
+    for language in AppLanguage.supported.map(\.tag) {
+      let languages = AppLanguageStore(
+        defaults: TemporaryDefaults.makeForCurrentTest().defaults, systemLanguages: [language])
+      PanelLocale.shared.bind(to: languages)
+      let slot = ModifiedMark.slotWidth()
+      XCTAssertEqual(ModifiedMark.reserve(for: nil), slot, "\(language): no mark keeps the whole slot")
+      for kind in [ModifiedMark.Kind.modified, .notApplied] {
+        let hosting = NSHostingView(
+          rootView: ModifiedMark(kind: kind).environment(\.locale, PanelLocale.shared.locale))
+        XCTAssertEqual(
+          hosting.fittingSize.width, ModifiedMark.width(kind), accuracy: 1,
+          "\(language) \(kind): the width a row counts is the pill it draws")
+        XCTAssertGreaterThanOrEqual(ModifiedMark.reserve(for: kind), 0, "\(language) \(kind)")
+        XCTAssertEqual(
+          ModifiedMark.width(kind) + ModifiedMark.reserve(for: kind), slot, "\(language) \(kind)")
+      }
+    }
   }
 }

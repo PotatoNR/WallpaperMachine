@@ -1,3 +1,4 @@
+import AppKit
 import Observation
 import XCTest
 
@@ -10,6 +11,75 @@ final class PanelShellActionsTests: PanelTestCase {
   private final class Flag: @unchecked Sendable {
     private(set) var raised = false
     func raise() { raised = true }
+  }
+
+  // MARK: Tile zoom
+
+  func testZoomingTheTilesIsSavedAndStopsAtTheLargestAndSmallestStep() throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    XCTAssertEqual(controller.tileZoom, 0)
+    XCTAssertFalse(controller.canZoomTiles(.actualSize), "already the standard size")
+    XCTAssertTrue(controller.zoomTiles(.zoomIn))
+    XCTAssertEqual(PanelPreferences.tileZoom(in: panel.defaults), 1, "saved for the next window")
+    while controller.canZoomTiles(.zoomIn) { controller.zoomTiles(.zoomIn) }
+    XCTAssertFalse(controller.zoomTiles(.zoomIn), "no step past the largest")
+    XCTAssertEqual(
+      TileGridLayout.preferredWidth(zoom: controller.tileZoom), TileGridLayout.zoomWidths.last)
+    XCTAssertTrue(controller.zoomTiles(.actualSize))
+    XCTAssertEqual(controller.tileZoom, 0)
+    XCTAssertNil(panel.defaults.object(forKey: PanelPreferences.tileZoomKey), "the standard size is no saved choice")
+    while controller.canZoomTiles(.zoomOut) { controller.zoomTiles(.zoomOut) }
+    XCTAssertEqual(
+      TileGridLayout.preferredWidth(zoom: controller.tileZoom), TileGridLayout.zoomWidths.first)
+  }
+
+  // MARK: View menu
+
+  func testTheViewMenusColumnItemsSayWhatTheyDoAndActOnTheOpenPanel() async throws {
+    try await withPanel { panel in
+      let app = AppDelegate()
+      let shell = panel.controller.shell
+      shell.windowWidthChanged(.regular)
+      let filters = NSMenuItem(title: "", action: #selector(AppDelegate.toggleFilterSidebar), keyEquivalent: "")
+      let details = NSMenuItem(title: "", action: #selector(AppDelegate.toggleWallpaperDetails), keyEquivalent: "")
+      XCTAssertFalse(app.validateMenuItem(filters), "no panel is open")
+      XCTAssertFalse(app.validateMenuItem(details))
+      XCTAssertEqual(filters.title, String(localized: "Show Filters"))
+
+      app.controlPanelNavigation.tileZoomTarget = panel.controller
+      XCTAssertTrue(app.validateMenuItem(filters))
+      XCTAssertEqual(filters.title, String(localized: "Show Filters"), "the sidebar starts closed")
+      app.toggleFilterSidebar()
+      XCTAssertTrue(shell.areFiltersShown)
+      XCTAssertTrue(app.validateMenuItem(filters))
+      XCTAssertEqual(filters.title, String(localized: "Hide Filters"))
+
+      XCTAssertTrue(app.validateMenuItem(details))
+      XCTAssertEqual(details.title, String(localized: "Hide Wallpaper Details"), "a wide window shows it")
+      app.toggleWallpaperDetails()
+      XCTAssertFalse(shell.isInspectorShown)
+      XCTAssertTrue(app.validateMenuItem(details))
+      XCTAssertEqual(details.title, String(localized: "Show Wallpaper Details"))
+
+      await shell.open(.settings).value
+      XCTAssertFalse(app.validateMenuItem(filters), "Settings has neither column")
+      XCTAssertFalse(app.validateMenuItem(details))
+      await shell.open(.wallpaper).value
+      shell.isWelcomeRequested = true
+      XCTAssertFalse(app.validateMenuItem(filters), "the guide covers both")
+      XCTAssertEqual(filters.title, String(localized: "Show Filters"), "a disabled item never says Hide")
+      XCTAssertFalse(app.validateMenuItem(details))
+    }
+  }
+
+  func testTheGuidesOpenInChineseForEitherChineseAndInEnglishOtherwise() {
+    XCTAssertEqual(AppDelegate.guidesURL(languageTag: "zh-Hans").absoluteString, "https://www.wallpapermachine.app/zh/guides/")
+    XCTAssertEqual(AppDelegate.guidesURL(languageTag: "zh-Hant").absoluteString, "https://www.wallpapermachine.app/zh/guides/")
+    for tag in ["en", "ja", "ko"] {
+      XCTAssertEqual(AppDelegate.guidesURL(languageTag: tag).absoluteString, "https://www.wallpapermachine.app/guides/", tag)
+    }
   }
 
   // MARK: Navigation
@@ -225,7 +295,7 @@ final class PanelShellActionsTests: PanelTestCase {
         BridgeSnapshotFixtures.options(
           wallpaperId: "w", properties: [BridgeSnapshotFixtures.textProperty(id: "size", labelHtml: label)])
       }
-      let labels = ["zh-chs": "大小", "ja-jp": "サイズ"]
+      let labels = ["zh-chs": "大小", "ja-jp": "サイズ", "ko-kr": "크기"]
       panel.bridge.options["w"] = options("Size")
       panel.store.wallpaperOptionsSnapshot = panel.bridge.options["w"]
       panel.bridge.onLabelLanguages = { locales in
@@ -238,6 +308,10 @@ final class PanelShellActionsTests: PanelTestCase {
       XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["zh-chs", "en-us"])
       XCTAssertEqual(panel.bridge.optionRequests, ["w"], "the open wallpaper is read again")
       XCTAssertEqual(rows(), ["大小"])
+
+      try await controller.setLanguage(try XCTUnwrap(AppLanguage.named("ko")))
+      XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["ko-kr", "en-us"])
+      XCTAssertEqual(rows(), ["크기"])
 
       try await controller.setLanguage(try XCTUnwrap(AppLanguage.named("ja")))
       XCTAssertEqual(panel.bridge.labelLanguageCalls.last, ["ja-jp", "en-us"])

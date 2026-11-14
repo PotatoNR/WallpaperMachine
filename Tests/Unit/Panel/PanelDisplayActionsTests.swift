@@ -278,6 +278,26 @@ final class PanelDisplayActionsTests: PanelTestCase {
     }
   }
 
+  func testMatchWithBlurredBackdropIsKeptForTheOneDisplayItWasChosenFor() async throws {
+    try await withSettingsPanel { panel, bridge in
+      let controller = panel.controller
+      try await controller.setDisplay("primary", .scalingMode(.matchBlurred))
+      XCTAssertEqual(
+        bridge.calls.filter { !$0.hasPrefix("applyWallpaperOptions") }, ["setScalingMode a primary matchBlurred"])
+      XCTAssertEqual(controller.displayRows[0].scalingMode, .matchBlurred)
+      XCTAssertEqual(controller.displayRows[1].scalingMode, .fill, "the other display keeps its own")
+
+      // A mirror keeps its own scaling too, with the same choice.
+      bridge.displays[1] = OrganizationFixtures.display(
+        "secondary", mode: .mirror, mirrorTargets: ["primary"], selectedMirrorTarget: "primary", maxFps: 120)
+      bridge.monitorRows[1] = OrganizationFixtures.monitor("secondary", wallpaper: "a", mirroring: "primary")
+      try await panel.store.refreshAllAsync()
+      try await controller.setDisplay("secondary", .scalingMode(.matchBlurred))
+      XCTAssertEqual(bridge.calls.last, "setMirrorScalingMode secondary matchBlurred")
+      XCTAssertEqual(controller.displayRows[1].scalingMode, .matchBlurred)
+    }
+  }
+
   func testApplyingADisplaySettingAlsoCommitsTheWallpapersOtherPendingEdits() async throws {
     try await withSettingsPanel { panel, bridge in
       let controller = panel.controller

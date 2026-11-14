@@ -16,8 +16,8 @@ extension SteamGuardGuide {
 /// line title, numbered steps and a note, and whatever the caller adds below (a progress bar, a
 /// status line).
 ///
-/// The Steam Guard guides use it, and so do the dialog's connecting and signed-in cards and the
-/// first-run guide's sign-in page. Its text is announced as a status, because it changes as Steam
+/// The Steam Guard guides use it, and so do the dialog's connecting and signed-in cards. Its text
+/// is announced as a status, because it changes as Steam
 /// answers. Titles and notes are already in the panel's language (they come from the model through
 /// `L()`), so they are drawn as they are.
 struct SteamGuideCard<Extra: View>: View {
@@ -76,11 +76,7 @@ struct SteamGuideCard<Extra: View>: View {
     }
     .padding(12)
     .foregroundStyle(theme.surface.text.color)
-    .background(theme.surface.card.color, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .strokeBorder(theme.surface.divider.color, lineWidth: 0.5)
-    }
+    .panelCardSurface()
     .accessibilityElement(children: .contain)
     .accessibilityLabel(Text(verbatim: title))
   }
@@ -93,8 +89,7 @@ extension SteamGuideCard where Extra == EmptyView {
 }
 
 /// The steps for one Steam Guard method: which device to pick up, what to press and what to type.
-/// Shared by the download dialog and the first-run guide, which both show it while a sign-in waits
-/// for the person.
+/// The download dialog shows it while a sign-in waits for the person.
 ///
 /// - Parameters:
 ///   - guide: what `SteamGuardGuide.guide(for:)` made of the job that is asking.

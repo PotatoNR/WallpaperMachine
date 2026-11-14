@@ -5,13 +5,24 @@ import XCTest
 final class SteamWebMemorySessionStore: SteamWebSessionStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var stored: SteamWebSession?
+    private var keeping = false
     var session: SteamWebSession? { lock.withLock { stored } }
+    /// Makes `remove` fail as a keychain that will neither delete nor empty the item would.
+    var keepsOnRemove: Bool {
+        get { lock.withLock { keeping } }
+        set { lock.withLock { keeping = newValue } }
+    }
 
     init(_ session: SteamWebSession? = nil) { stored = session }
 
     func load() -> SteamWebSession? { lock.withLock { stored } }
     func save(_ session: SteamWebSession) throws { lock.withLock { stored = session } }
-    func remove() { lock.withLock { stored = nil } }
+    func remove() throws {
+        try lock.withLock {
+            guard !keeping else { throw KeychainRemovalFailed(reason: "kept") }
+            stored = nil
+        }
+    }
 }
 
 /// Synthetic Steam tokens: a JSON Web Token whose only claim that matters here is `exp`.
@@ -31,6 +42,29 @@ enum SteamWebFixtures {
 }
 
 final class SteamWebSessionTests: XCTestCase {
+    /// macOS refuses to delete a session another build saved but lets its data change: the sign-out
+    /// still leaves nothing to sign in with, and fails only when the keychain refuses that too.
+    func testASavedSessionAnotherBuildSavedIsEmptiedOrTheSignOutFails() throws {
+        let service = KeychainSteamWebSessionStore.service, account = KeychainSteamWebSessionStore.account
+        let session = try XCTUnwrap(SteamWebSession(
+            cookie: SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: 3600)),
+            refresh: SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: 86_400, salt: "r"))))
+        let saving = MemoryKeychain()
+        try KeychainSteamWebSessionStore(calls: saving).save(session)
+        let saved = try XCTUnwrap(saving.data(service: service, account: account))
+
+        let keychain = MemoryKeychain()
+        keychain.holdItemSavedByAnotherBuild(service: service, account: account, data: saved)
+        try KeychainSteamWebSessionStore(calls: keychain).remove()
+        XCTAssertEqual(keychain.data(service: service, account: account), Data(), "no cookie or renewal token is left")
+
+        let refusing = MemoryKeychain()
+        refusing.holdItemSavedByAnotherBuild(service: service, account: account, data: saved)
+        refusing.refuseUpdates(with: errSecInteractionNotAllowed)
+        XCTAssertThrowsError(try KeychainSteamWebSessionStore(calls: refusing).remove())
+        XCTAssertEqual(refusing.data(service: service, account: account), saved)
+    }
+
     func testTheRenewalTokenIsKeptOnlyForTheSameAccount() throws {
         let access = SteamWebFixtures.token(expiresIn: 3600)
         let refresh = SteamWebFixtures.token(expiresIn: 200 * 86_400, salt: "r")

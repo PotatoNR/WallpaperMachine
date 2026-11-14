@@ -57,7 +57,7 @@ struct PlacementCard: View {
         } label: {
           Label("Reset to Image fit", systemImage: "arrow.counterclockwise")
         }
-        .buttonStyle(.inspectorLink)
+        .buttonStyle(.panelCardLink)
         .disabled(!drafts.canReset(state))
         .help(L("Puts the picture back where Image fit alone places it"))
         if state.fit == .blur {

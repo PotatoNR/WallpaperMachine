@@ -9,6 +9,19 @@ enum AppUpdateConfiguration {
     static let applicationName = productName + ".app"
     static let maximumDownloadBytes: Int64 = 1_073_741_824
 
+    /// The code-signing requirement a copy must meet to count as a release, and so to be
+    /// installed by the updater. Intel build note: this fork's images are ad-hoc signed — no
+    /// Developer ID and no project certificate — so the upstream signer pin cannot apply and
+    /// only the bundle identifier is required. The downloaded image is still checked against
+    /// the release's SHA-256 digest (`AppUpdatePersistence`), and `scripts/intel/make_dmg.sh`
+    /// is the only thing that writes it.
+    static let signingRequirement = #"identifier "app.wallpapermachine""#
+
+    /// Apple's Developer ID chain for upstream's team, kept so the telemetry code that asks
+    /// `signedWithDeveloperID` still compiles; this fork's builds never satisfy it.
+    static let developerIDRequirement = #"anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"#
+        + #" and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "DT6YQU64FF""#
+
     /// The drag-to-install disk image `scripts/intel/make_dmg.sh` produces and this fork
     /// publishes. Renaming one side without the other silently drops every user back to a
     /// manual download.
@@ -38,17 +51,25 @@ enum AppUpdateConfiguration {
     static var latestManifestURL: URL {
         URL(string: "https://github.com/\(repository)/releases/latest/download/\(manifestName)")!
     }
+
+    /// Public GitHub download proxies, tried in order for the manifest and the disk image when
+    /// GitHub itself can't be reached (mainland China without a VPN). Each takes the whole GitHub
+    /// URL after its own (`https://ghfast.top/https://github.com/…`) and relays GitHub's bytes.
+    /// They are untrusted transport: what installs is decided by the signature and version
+    /// checks, so a proxy can withhold an update but never substitute one.
+    static let mirrors: [URL] = ["https://ghfast.top/", "https://gh-proxy.com/", "https://gh.llkk.cc/"]
+        .map { URL(string: $0)! }
 }
 
 enum AppUpdateErrorCode: String, Equatable, Sendable {
-    case network, rateLimited, configuration, verification, permission, unknown
+    case network, rateLimited, configuration, verification, permission, incompatible, unknown
 }
 
 enum AppUpdateOperation: String, Equatable, Sendable {
     case check, download, install
 }
 
-struct SemanticVersion: Comparable, Equatable, Sendable {
+struct SemanticVersion: Comparable, Equatable, Codable, Sendable {
     let major: Int
     let minor: Int
     let patch: Int
@@ -82,7 +103,7 @@ struct SemanticVersion: Comparable, Equatable, Sendable {
     }
 }
 
-struct GitHubReleaseAsset: Equatable, Sendable {
+struct GitHubReleaseAsset: Equatable, Codable, Sendable {
     let name: String
     let downloadURL: URL
     let size: Int64
@@ -90,20 +111,32 @@ struct GitHubReleaseAsset: Equatable, Sendable {
     var isDiskImage: Bool { name.lowercased().hasSuffix(".dmg") }
 }
 
-struct GitHubRelease: Equatable, Sendable {
+struct GitHubRelease: Equatable, Codable, Sendable {
     let version: SemanticVersion
     let htmlURL: URL
     let prerelease: Bool
     let assets: [GitHubReleaseAsset]
     /// The release body as GitHub published it, Markdown and all.
     let notes: String
+    /// The newest `CHANGELOG.md` sections in every translation, which only the update manifest
+    /// carries; empty from the API and from manifests written before it did.
+    let changelog: String
+    let minimumSystemVersion: String?
+    let architectures: [String]?
+    let bundleIdentifier: String?
 
-    init(version: SemanticVersion, htmlURL: URL, prerelease: Bool, assets: [GitHubReleaseAsset], notes: String = "") {
+    init(version: SemanticVersion, htmlURL: URL, prerelease: Bool, assets: [GitHubReleaseAsset],
+         notes: String = "", changelog: String = "", minimumSystemVersion: String? = nil,
+         architectures: [String]? = nil, bundleIdentifier: String? = nil) {
         self.version = version
         self.htmlURL = htmlURL
         self.prerelease = prerelease
         self.assets = assets
         self.notes = notes
+        self.changelog = changelog
+        self.minimumSystemVersion = minimumSystemVersion
+        self.architectures = architectures
+        self.bundleIdentifier = bundleIdentifier
     }
 }
 
@@ -119,9 +152,12 @@ struct ReleaseNotes: Equatable, Sendable {
         let items: [String]
         /// Bullet items, as opposed to a paragraph such as a release's summary.
         var isList = false
+        /// The same items as inline Markdown, links and their issue and commit references kept,
+        /// for the update window; `items` is the plain reading About shows.
+        var markdown: [String] = []
 
-        /// The section `scripts/release_notes.py` heads Highlights / 亮点 in feature releases.
-        var isHighlights: Bool { title == "Highlights" || title == "亮点" }
+        /// Feature-release highlights keep their emphasis in every notes translation.
+        var isHighlights: Bool { title == "Highlights" || title == "亮点" || title == "주요 변경 사항" }
     }
 
     static let boundary = "<!-- release-notes-end -->"
@@ -141,11 +177,15 @@ struct ReleaseNotes: Equatable, Sendable {
         var sections: [Section] = []
         var title = ""
         var items: [String] = []
+        var markdown: [String] = []
         var bullets = false
         func flush(into next: String) {
-            if !items.isEmpty { sections.append(Section(title: title, items: items, isList: bullets)) }
+            if !items.isEmpty {
+                sections.append(Section(title: title, items: items, isList: bullets, markdown: markdown))
+            }
             title = next
             items = []
+            markdown = []
         }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -162,20 +202,31 @@ struct ReleaseNotes: Equatable, Sendable {
             // A paragraph after a list closes it; it is a remark, not another entry.
             if !items.isEmpty, isBullet != bullets { flush(into: "") }
             bullets = isBullet
-            let item = plain(isBullet ? trimmed.dropFirst(2) : trimmed[...])
-            if !item.isEmpty { items.append(item) }
+            let source = isBullet ? trimmed.dropFirst(2) : trimmed[...]
+            let item = plain(source)
+            if !item.isEmpty {
+                items.append(item)
+                markdown.append(source.trimmingCharacters(in: .whitespaces))
+            }
         }
         flush(into: "")
         return sections
     }
 
-    /// Markdown reduced to the words: the trailing commit reference goes, links keep
+    /// A trailing group of reference links, `(closes [#76](…))` or `([abc1234](…), [def5678](…))`.
+    private static let trailingReferences: String = {
+        let link = #"(?:closes )?\[(?:#[0-9]+|`?[0-9a-f]{7,40}`?)\]\([^)]*\)"#
+        return #"\s*\("# + link + #"(?:,\s*"# + link + #")*\)$"#
+    }()
+
+    /// Markdown reduced to the words: the trailing issue and commit references go, links keep
     /// their text, emphasis and code fences lose their markers.
     private static func plain(_ value: Substring) -> String {
         var text = String(value).trimmingCharacters(in: .whitespaces)
-        for pattern in [#"\s*\(\[`[0-9a-f]{7,40}`\]\([^)]*\)\)$"#, #"\s*\(`[0-9a-f]{7,40}`\)$"#] {
-            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        while let range = text.range(of: trailingReferences, options: .regularExpression) {
+            text.removeSubrange(range)
         }
+        text = text.replacingOccurrences(of: #"\s*\(`[0-9a-f]{7,40}`\)$"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\*{1,2}([^*]+)\*{1,2}"#, with: "$1", options: .regularExpression)
         text = text.replacingOccurrences(of: "`", with: "")
@@ -295,8 +346,13 @@ enum GitHubReleaseParser {
             guard let url = URL(string: asset.browserDownloadURL) else { return nil }
             return GitHubReleaseAsset(name: asset.name, downloadURL: url, size: asset.size, digest: asset.digest)
         }
-        return GitHubRelease(version: version, htmlURL: htmlURL, prerelease: payload.prerelease,
-                             assets: assets, notes: payload.body ?? "")
+        // A manifest relayed by a mirror could name any page; About opens only GitHub's.
+        let releasePage = htmlURL.scheme == "https" && htmlURL.host?.lowercased() == "github.com"
+            ? htmlURL : AppUpdateConfiguration.releasesURL
+        return GitHubRelease(version: version, htmlURL: releasePage, prerelease: payload.prerelease,
+                             assets: assets, notes: payload.body ?? "", changelog: payload.changelog ?? "",
+                             minimumSystemVersion: payload.minimumSystemVersion,
+                             architectures: payload.architectures, bundleIdentifier: payload.bundleIdentifier)
     }
 
     /// The disk image to download: only product-named `.dmg` assets qualify, so the
@@ -318,11 +374,17 @@ enum GitHubReleaseParser {
         let prerelease: Bool
         let assets: [Asset]
         let body: String?
+        let changelog: String?
+        let minimumSystemVersion: String?
+        let architectures: [String]?
+        let bundleIdentifier: String?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
             case htmlURL = "html_url"
-            case prerelease, assets, body
+            case minimumSystemVersion = "minimum_system_version"
+            case bundleIdentifier = "bundle_identifier"
+            case prerelease, assets, body, changelog, architectures
         }
 
         struct Asset: Decodable {

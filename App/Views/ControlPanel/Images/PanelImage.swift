@@ -21,11 +21,19 @@ struct PanelImage: View {
 
   @Environment(\.panelImages) private var images
   @Environment(\.displayScale) private var displayScale
-  @State private var loaded: (request: Request, image: DecodedPanelImage)?
+  @State private var state = ImageState()
 
-  private struct Request: Hashable {
+  fileprivate struct Request: Hashable {
     let source: PanelImageSource
     let pixels: Int
+  }
+
+  // A reference keeps old SwiftUI view snapshots from retaining a previous decoded image.
+  @Observable fileprivate final class ImageState {
+    var loaded: (request: Request, image: DecodedPanelImage)?
+    /// The request whose load failed, so the view can say there is no picture to show.
+    var failed: Request?
+    var isActive = true
   }
 
   private var request: Request? {
@@ -33,9 +41,16 @@ struct PanelImage: View {
   }
 
   private var displayed: DecodedPanelImage? {
-    guard let request else { return nil }
-    if let loaded, loaded.request == request { return loaded.image }
+    guard state.isActive, let request else { return nil }
+    if let loaded = state.loaded, loaded.request == request { return loaded.image }
     return images?.cachedImage(for: request.source, maxPixelSize: request.pixels)
+  }
+
+  /// The load of what the view shows now failed: a missing or unreadable file, a download that
+  /// did not arrive. Without a mark it would look like an image that is still on its way.
+  private var hasFailed: Bool {
+    guard state.isActive, let request else { return false }
+    return state.failed == request
   }
 
   var body: some View {
@@ -45,19 +60,44 @@ struct PanelImage: View {
           Image(decorative: image.cgImage, scale: 1)
             .resizable()
             .aspectRatio(contentMode: contentMode)
+        } else if hasFailed {
+          Image(systemName: "photo")
+            .font(.system(size: 18, weight: .regular))
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
         }
       }
       .clipped()
       .task(id: request) { await load() }
+      // Lazy grids keep row state after disappearance; only the bounded cache should keep pixels.
+      // Reactivating on appear, not in the task, lets a returning row show a cached still in its
+      // first frame instead of the placeholder.
+      .onAppear { state.isActive = true }
+      .onDisappear {
+        state.isActive = false
+        state.loaded = nil
+        state.failed = nil
+      }
   }
 
   private func load() async {
-    guard let request, let images else { return }
-    if loaded?.request == request { return }
-    if images.cachedImage(for: request.source, maxPixelSize: request.pixels) != nil { return }
-    guard let image = try? await images.image(for: request.source, maxPixelSize: request.pixels)
-    else { return }
     guard !Task.isCancelled else { return }
-    loaded = (request, image)
+    guard let request, let images else {
+      state.loaded = nil
+      state.failed = nil
+      return
+    }
+    if state.loaded?.request == request { return }
+    state.loaded = nil
+    state.failed = nil
+    do {
+      let image = try await images.image(for: request.source, maxPixelSize: request.pixels)
+      guard !Task.isCancelled else { return }
+      state.loaded = (request, image)
+    } catch {
+      // A load that was cancelled (the view left, the source changed) did not fail.
+      guard !Task.isCancelled, !(error is CancellationError) else { return }
+      state.failed = request
+    }
   }
 }

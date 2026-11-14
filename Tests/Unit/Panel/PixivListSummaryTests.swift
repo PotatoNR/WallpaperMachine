@@ -49,12 +49,12 @@ final class PixivListSummaryTests: MediaPanelTestCase {
       try await loaded(panel)
       XCTAssertEqual(
         PixivListSummary.make(panel.controller.pixivBrowse).text,
-        "Daily ranking · top 500 · 1 hidden by your filters on this page")
+        "Daily ranking · 2 results")
 
       await panel.controller.pixivBrowser.set(.questionable, isOn: true).value
       try await waitFor { panel.pixiv.hiddenCount == 0 }
       XCTAssertEqual(
-        PixivListSummary.make(panel.controller.pixivBrowse).text, "Daily ranking · top 500",
+        PixivListSummary.make(panel.controller.pixivBrowse).text, "Daily ranking · 3 results",
         "nothing hidden adds nothing")
 
       await panel.controller.pixivBrowser.choose(ranking: .monthly).value
@@ -62,7 +62,7 @@ final class PixivListSummaryTests: MediaPanelTestCase {
         panel.pixiv.committedQuery?.ranking == .monthly && !panel.pixiv.isLoading
       }
       XCTAssertEqual(
-        PixivListSummary.make(panel.controller.pixivBrowse).text, "Monthly ranking · top 500")
+        PixivListSummary.make(panel.controller.pixivBrowse).text, "Monthly ranking · 3 results")
     }
   }
 
@@ -87,7 +87,7 @@ final class PixivListSummaryTests: MediaPanelTestCase {
     let gate = DispatchSemaphore(value: 0)
     let held = PixivFixtureTransport { _ in
       _ = gate.wait(timeout: .now() + 10)
-      return PixivFixtures.ranking([PixivFixtures.rankingEntry(.init(id: 301), rank: 1)])
+      return PixivFixtures.ranking([PixivFixtures.rankingEntry(.init(id: 301), rank: 1)], total: 1)
     }
     try await withPanel(pixivTransport: held) { panel in
       await panel.controller.pixivBrowser.commit().value
@@ -117,12 +117,12 @@ final class PixivListSummaryTests: MediaPanelTestCase {
       try await loaded(panel)
       XCTAssertEqual(
         PixivEmptyState.make(panel.controller.pixivBrowse),
-        .filtersHideAll(hidden: 3, canGoNext: true))
+        .filtersHideAll)
       await panel.controller.pixivBrowser.set(.everyone, isOn: false).value
       try await settle(panel)
       XCTAssertEqual(
         PixivEmptyState.make(panel.controller.pixivBrowse),
-        .filtersHideAll(hidden: 3, canGoNext: true))
+        .filtersHideAll)
     }
     // An empty ranking, and an empty search.
     try await withPanel(pixivTransport: try ranking(entries: { [] })) { panel in
@@ -186,7 +186,7 @@ final class PixivListSummaryTests: MediaPanelTestCase {
       try await settle(panel)
     }
     // Every work of a page hidden: the bar stays while there are other pages to go to.
-    for (total, shown) in [(500, true), (3, false)] {
+    for (total, shown) in [(500, false), (3, false)] {
       try await withPanel(
         pixivTransport: PixivFixtureTransport { _ in
           PixivFixtures.ranking(
@@ -323,23 +323,37 @@ final class PixivListSummaryTests: MediaPanelTestCase {
   }
 
   func testApplyReappliesWhatTheTargetShowsAndNeedsADisplayThatCanShowIt() {
+    let idle: (String) -> Bool = { _ in false }
     XCTAssertEqual(
-      PixivApplyOffer(
-        libraryID: "pixiv-301-p0",
-        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil)),
-      PixivApplyOffer(
-        libraryID: "pixiv-301-p0",
-        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "other")))
-    let showing = PixivApplyOffer(
-      libraryID: "pixiv-301-p0",
-      target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0"))
+      ApplyOffer(
+        wallpaperID: "pixiv-301-p0",
+        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil), isBusy: idle),
+      ApplyOffer(
+        wallpaperID: "pixiv-301-p0",
+        target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "other"), isBusy: idle))
+    let showing = ApplyOffer(
+      wallpaperID: "pixiv-301-p0",
+      target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0"), isBusy: idle)
     XCTAssertTrue(showing.reapplies)
     XCTAssertTrue(showing.isEnabled)
-    let mirror = PixivApplyOffer(
-      libraryID: "pixiv-301-p0", target: MediaApplyTarget(canShowWallpaper: false, wallpaperID: nil)
-    )
+    let mirror = ApplyOffer(
+      wallpaperID: "pixiv-301-p0",
+      target: MediaApplyTarget(canShowWallpaper: false, wallpaperID: nil), isBusy: idle)
     XCTAssertFalse(mirror.reapplies)
     XCTAssertFalse(mirror.isEnabled, "a mirror or a disabled display cannot take it")
+  }
+
+  func testAReapplyRunsUnderItsOwnKeyAndWaitsForTheOneUnderWay() {
+    let target = MediaApplyTarget(canShowWallpaper: true, wallpaperID: "pixiv-301-p0")
+    let reapply = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { _ in false }
+    let apply = ApplyOffer(
+      wallpaperID: "pixiv-301-p0", target: MediaApplyTarget(canShowWallpaper: true, wallpaperID: nil)
+    ) { _ in false }
+    XCTAssertNotEqual(reapply.key, apply.key, "a reapply never waits behind a plain apply")
+    let pending = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { $0 == reapply.key }
+    XCTAssertFalse(pending.isEnabled, "the button waits while its reapply is under way")
+    let other = ApplyOffer(wallpaperID: "pixiv-301-p0", target: target) { $0 == apply.key }
+    XCTAssertTrue(other.isEnabled)
   }
 
   // MARK: The ring

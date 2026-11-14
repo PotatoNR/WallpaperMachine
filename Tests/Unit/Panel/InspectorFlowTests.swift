@@ -101,20 +101,6 @@ final class InspectorFlowTests: InspectorTestCase {
 
   // MARK: Words and rules the views draw from
 
-  func testTheMediaSwitchStartsOffAndSaysSo() throws {
-    var inputs = InspectorOptions.Inputs()
-    inputs.locale = PanelLocale(language: .english, region: nil)
-    let options = InspectorOptions.make(
-      BridgeSnapshotFixtures.options(kind: .webpage), inputs: inputs)
-    XCTAssertFalse(options.mediaIntegrationEnabled)
-    XCTAssertTrue(options.offersMediaIntegration)
-    XCTAssertEqual(InspectorWording.mediaStatus(options), "Off. The wallpaper gets no track information.")
-    XCTAssertEqual(
-      InspectorWording.audioStatus(options),
-      "On. Apply the wallpaper to see whether it uses audio.",
-      "an unobserved web page says nothing was observed")
-  }
-
   func testOnlyASupportedSceneOrVideoOffersAPositionAndOnlySceneAndWebOfferMedia() {
     func options(_ kind: BridgeWallpaperKind, supported: Bool = true) -> InspectorOptions {
       var inputs = InspectorOptions.Inputs()
@@ -143,6 +129,28 @@ final class InspectorFlowTests: InspectorTestCase {
     let without = InspectorOptions.make(BridgeSnapshotFixtures.options(), inputs: inputs)
     XCTAssertTrue(InspectorPolicy.displaysOpenByDefault(withDisplays))
     XCTAssertFalse(InspectorPolicy.displaysOpenByDefault(without))
+
+    // One display's card starts open with no summary; beside another display both start collapsed
+    // under their summaries, except a card holding a value that waits for Apply changes.
+    XCTAssertFalse(InspectorPolicy.summarizesDisplays(withDisplays))
+    XCTAssertEqual(
+      withDisplays.displays.map { InspectorPolicy.displayCardOpenByDefault(withDisplays, display: $0) }, [true])
+    func two(secondStaged: Bool) -> InspectorOptions {
+      InspectorOptions.make(
+        BridgeSnapshotFixtures.options(
+          displayConfigurations: [
+            InspectorRenderFixture.config("primary", "Studio", mode: .fill, factor: 1, pan: (0.5, 0.5)),
+            InspectorRenderFixture.config(
+              "second", "LG", mode: .match, factor: 1.2, pan: (0.5, 0.5), staged: secondStaged),
+          ]), inputs: inputs)
+    }
+    for staged in [false, true] {
+      let options = two(secondStaged: staged)
+      XCTAssertTrue(InspectorPolicy.summarizesDisplays(options))
+      XCTAssertEqual(
+        options.displays.map { InspectorPolicy.displayCardOpenByDefault(options, display: $0) }, [false, staged],
+        staged ? "the card with a value waiting opens, the other stays collapsed" : "both collapsed")
+    }
 
     let rows = [
       CollectionRow(id: "c1", name: "Calm", wallpaperIDs: ["a"]),
@@ -272,16 +280,27 @@ final class InspectorFlowTests: InspectorTestCase {
     let dynamic =
       [WallpaperCompatibilityCheck.Status.ok, .warning, .unavailable, .unknown].map(InspectorGlyphs.compatibility)
       + [InspectorWording.LetterboxGlyph.ok, .info, .unclear, .failed].map(InspectorGlyphs.letterbox)
+    let shared =
+      [ApplyOffer.symbol, ApplyOffer.reapplySymbol, TileMark.inLibrary.systemImage]
+      + DownloadRowAction.allCases.map(\.systemImage)
     let fixed = [
-      "photo", "heart", "heart.fill", "ellipsis", "play.fill", "arrow.clockwise", "eye", "folder",
+      "photo", "heart", "heart.fill", "ellipsis", "arrow.clockwise", "eye", "folder",
       "display.2", "text.badge.plus", "text.badge.minus", "arrow.triangle.2.circlepath",
       "exclamationmark.bubble", "trash", "arrow.down.circle", "arrow.down.circle.fill",
       "checkmark.shield", "hourglass", "arrow.up.right.square", "minus.circle", "plus",
       "arrow.counterclockwise", "slider.horizontal.3", "chevron.right", "info.circle.fill",
       "exclamationmark.triangle.fill", "exclamationmark.octagon.fill", "checkmark.circle.fill",
     ]
-    for name in dynamic + fixed {
+    for name in dynamic + shared + fixed {
       XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil), "\(name) is not an SF Symbol")
     }
+  }
+
+  /// Play starts a rotation or resumes playback; applying a wallpaper, reapplying it and resuming a
+  /// download each draw a symbol of their own, so none of them reads as Play.
+  func testApplyReapplyAndResumeDownloadEachHaveTheirOwnSymbolAndNoneIsPlay() {
+    let symbols = [ApplyOffer.symbol, ApplyOffer.reapplySymbol, DownloadRowAction.resume.systemImage]
+    XCTAssertEqual(Set(symbols).count, symbols.count, "\(symbols) are told apart")
+    XCTAssertFalse(symbols.contains("play.fill"), "play.fill is only Play and resuming playback")
   }
 }

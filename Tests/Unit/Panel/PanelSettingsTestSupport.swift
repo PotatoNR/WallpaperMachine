@@ -12,15 +12,14 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     var targetFps: UInt32
   }
 
-  var videoBackendCalls: [String] = []
   var batteryProfileCalls: [Profile] = []
-  var contentPacingCalls: [Bool] = []
-  var sharedVideoDecodeCalls: [Bool] = []
   var sceneOptimizationCalls: [Bool] = []
   var sceneOnDemandCalls: [Bool] = []
+  var metalFXUpscalingCalls: [Bool] = []
   var sceneVideoPlaneSamplingCalls: [Bool] = []
-  var sceneRendererCalls: [String] = []
+  var sceneDisplayFramingCalls: [Bool] = []
   var sceneResolutionCalls: [String] = []
+  var sceneQualityCalls: [BridgeSceneQuality] = []
   var verboseLoggingCalls: [Bool] = []
   /// Counted off the main actor: the store reads these synchronously.
   let clearShaderCacheCalls = SettingsCallCounter()
@@ -36,26 +35,12 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     return bundle
   }
 
-  override func setVideoBackend(mode: String) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.videoBackendCalls.append(mode) }) { $0.videoBackend = mode }
-  }
-
   override func setBatteryQualityProfile(renderScale: Float, targetFps: UInt32) async throws
     -> BridgeSnapshotBundle
   {
     try await record({ $0.batteryProfileCalls.append(Profile(renderScale: renderScale, targetFps: targetFps)) }) {
       $0.batteryRenderScale = renderScale
       $0.batteryTargetFps = targetFps
-    }
-  }
-
-  override func setContentPacingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.contentPacingCalls.append(enabled) }) { $0.contentPacingEnabled = enabled }
-  }
-
-  override func setSharedVideoDecodeEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.sharedVideoDecodeCalls.append(enabled) }) {
-      $0.sharedVideoDecodeEnabled = enabled
     }
   }
 
@@ -69,6 +54,12 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     try await record({ $0.sceneOnDemandCalls.append(enabled) }) { $0.sceneOnDemandEnabled = enabled }
   }
 
+  override func setMetalfxUpscalingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.metalFXUpscalingCalls.append(enabled) }) {
+      $0.metalfxUpscalingEnabled = enabled
+    }
+  }
+
   override func setSceneVideoPlaneSamplingEnabled(enabled: Bool) async throws
     -> BridgeSnapshotBundle
   {
@@ -77,12 +68,18 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     }
   }
 
-  override func setSceneRenderer(mode: String) async throws -> BridgeSnapshotBundle {
-    try await record({ $0.sceneRendererCalls.append(mode) }) { $0.sceneRenderer = mode }
+  override func setSceneDisplayFramingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.sceneDisplayFramingCalls.append(enabled) }) {
+      $0.sceneDisplayFramingEnabled = enabled
+    }
   }
 
   override func setSceneResolution(mode: String) async throws -> BridgeSnapshotBundle {
     try await record({ $0.sceneResolutionCalls.append(mode) }) { $0.sceneResolution = mode }
+  }
+
+  override func setSceneQuality(quality: BridgeSceneQuality) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.sceneQualityCalls.append(quality) }) { $0.sceneQuality = quality }
   }
 
   override func setVerboseLogging(enabled: Bool) async throws -> BridgeSnapshotBundle {
@@ -179,13 +176,15 @@ extension PanelFixture {
   func buildSettingsController(
     updater: AppUpdateStore? = nil, energyUsage: EnergyUsageMonitor? = nil
   ) -> PanelController {
-    PanelController(
+    let language = AppLanguageStore.english()
+    return PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv, updater: updater,
       presentation: presentation, theme: theme, defaults: defaults, dialogs: dialogs,
-      energyUsage: energyUsage, appLanguage: .english(),
+      energyUsage: energyUsage, appLanguage: language,
       playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
       backup: backup, imagePlacement: imagePlacement, compatibility: compatibility,
-      automations: automations, spaces: spaces, systemConditions: systemConditions)
+      automations: automations, spaces: spaces, systemConditions: systemConditions,
+      searchTranslation: .fake(defaults: defaults, backend: translation, language: language))
   }
 }

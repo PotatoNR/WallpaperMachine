@@ -53,12 +53,15 @@ final class AppearanceSettingsTests: PanelTestCase {
       settings.applyTheme { try controller.setThemeAccent("#B43271") }
       settings.applyTheme { try controller.setThemeTone(.warm) }
       settings.applyTheme { try controller.setThemeIcon(.night) }
+      settings.applyTheme { try controller.setThemeHalloween(.off) }
       XCTAssertEqual(controller.themePreferences.mode, .dark)
       XCTAssertEqual(controller.themePreferences.accent, "#b43271", "The accent is kept in lower case")
       XCTAssertEqual(controller.themePreferences.tone, .warm)
       XCTAssertEqual(controller.themePreferences.icon, .night)
+      XCTAssertEqual(controller.themePreferences.halloween, .off)
       let saved = try XCTUnwrap(panel.defaults.dictionary(forKey: AppThemeStore.defaultsKey) as? [String: String])
-      XCTAssertEqual(saved, ["mode": "dark", "accent": "#b43271", "tone": "warm", "icon": "night"])
+      XCTAssertEqual(
+        saved, ["mode": "dark", "accent": "#b43271", "tone": "warm", "icon": "night", "halloween": "off"])
 
       settings.applyTheme { controller.resetTheme() }
       XCTAssertEqual(controller.themePreferences, AppThemePreferences())
@@ -73,6 +76,8 @@ final class AppearanceSettingsTests: PanelTestCase {
     XCTAssertEqual(AppThemePreferences.Mode.allCases.map(\.title), ["System (Auto)", "Light", "Dark"])
     XCTAssertEqual(AppThemePreferences.Tone.allCases.map(\.title), ["Neutral", "Warm", "Cool"])
     XCTAssertEqual(AppThemePreferences.Icon.allCases.map(\.title), ["Minimal", "Day", "Night"])
+    XCTAssertEqual(
+      AppThemePreferences.Halloween.allCases.map(\.title), ["Halloween week", "Always", "Off"])
     for appearance in [PanelAppearance.light, .dark] {
       let tones = AppThemePreferences.Tone.allCases.map {
         SurfacePalette.miniature(tone: $0, appearance: appearance).background
@@ -82,6 +87,36 @@ final class AppearanceSettingsTests: PanelTestCase {
     XCTAssertNotEqual(
       SurfacePalette.miniature(tone: .neutral, appearance: .light).background,
       SurfacePalette.miniature(tone: .neutral, appearance: .dark).background)
+    for appearance in [PanelAppearance.light, .dark] {
+      let halloween = SurfacePalette.miniature(season: .halloween, appearance: appearance)
+      XCTAssertNotNil(halloween.moon, "The Halloween card has its moon")
+      for tone in AppThemePreferences.Tone.allCases {
+        let everyday = SurfacePalette.miniature(tone: tone, appearance: appearance)
+        XCTAssertNil(everyday.moon)
+        XCTAssertNotEqual(halloween.background, everyday.background, "\(tone) \(appearance)")
+      }
+    }
+  }
+
+  func testWhileTheHalloweenLookIsOnTheWindowAndTheDockWearItAndTheChoicesUnderItAreKept() async throws {
+    try await withRecordingPanel { panel, _ in
+      let controller = panel.controller
+      let settings = controller.settings
+      settings.applyTheme { try controller.setThemeAccent("#30d158") }
+      settings.applyTheme { try controller.setThemeIcon(.night) }
+      XCTAssertNil(controller.season, "The panel fixture's date is outside Halloween week")
+      XCTAssertEqual(controller.dockIconName, AppThemePreferences.Icon.night.imageName)
+
+      settings.applyTheme { try controller.setThemeHalloween(.always) }
+      XCTAssertEqual(controller.season, .halloween)
+      XCTAssertEqual(controller.dockIconName, Season.halloween.dockImageName)
+      XCTAssertEqual(controller.themePreferences.accent, "#30d158", "The person's accent is kept")
+      XCTAssertEqual(controller.themePreferences.icon, .night, "The person's icon is kept")
+
+      settings.applyTheme { controller.resetTheme() }
+      XCTAssertNil(controller.season)
+      XCTAssertEqual(controller.dockIconName, AppThemePreferences.Icon.day.imageName)
+    }
   }
 
   func testEveryAppIconTheCardsShowIsInTheAssetCatalogAndLoadsForTheDock() throws {
@@ -91,13 +126,23 @@ final class AppearanceSettingsTests: PanelTestCase {
     }
   }
 
+  func testEveryPictureTheHalloweenLookDrawsIsInTheAssetCatalog() {
+    let names =
+      [Season.halloween.dockImageName, SeasonHorizon.flock(.halloween)]
+      + SeasonHorizon.pieces(.halloween).map(\.name)
+      + [SeasonalArt.emptyLibrary, .noResults].map { $0.imageName(in: .halloween) }
+    for name in names {
+      XCTAssertNotNil(NSImage(named: NSImage.Name(name)), "\(name) is not in the asset catalog")
+    }
+  }
+
   // MARK: Language
 
   func testTheLanguageMenuOffersSystemFirstAndEveryShippedLanguageUnderItsOwnName() throws {
     try pinPanelLanguageToEnglish()
     let options = GeneralSettingsSection.languageOptions()
     XCTAssertEqual(options.map(\.value), [AppLanguageStore.systemChoice] + AppLanguage.supported.map(\.tag))
-    XCTAssertEqual(options.map(\.title), ["System (Auto)", "English", "简体中文", "繁體中文", "日本語"])
+    XCTAssertEqual(options.map(\.title), ["System (Auto)"] + AppLanguage.supported.map(\.name))
 
     // Their own names are never translated, whatever the panel shows.
     let japanese = AppLanguageStore(
@@ -105,7 +150,7 @@ final class AppearanceSettingsTests: PanelTestCase {
     PanelLocale.shared.bind(to: japanese)
     addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
     let inJapanese = GeneralSettingsSection.languageOptions()
-    XCTAssertEqual(inJapanese.map(\.title).dropFirst(), ["English", "简体中文", "繁體中文", "日本語"])
+    XCTAssertEqual(Array(inJapanese.map(\.title).dropFirst()), AppLanguage.supported.map(\.name))
     XCTAssertNotEqual(inJapanese.first?.title, "System (Auto)", "Only the system entry follows the language")
   }
 
@@ -117,7 +162,8 @@ final class AppearanceSettingsTests: PanelTestCase {
       addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
       XCTAssertEqual(PanelLocale.shared.tag, "en")
 
-      for (tag, expected) in [("zh-Hans", "zh-Hans"), ("ja", "ja"), (AppLanguageStore.systemChoice, "en")] {
+      let choices = AppLanguage.supported.map { ($0.tag, $0.tag) } + [(AppLanguageStore.systemChoice, "en")]
+      for (tag, expected) in choices {
         let task = try XCTUnwrap(
           settings.commit("language", to: tag) { try await controller.setLanguage(AppLanguage.named($0)) })
         await task.value

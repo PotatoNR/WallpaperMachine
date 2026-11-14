@@ -61,6 +61,52 @@ final class DisplaysRowLayoutTests: XCTestCase {
     XCTAssertEqual(size(fixed, width: 1).width, 100, accuracy: 1, "the label is the widest of the two minimums")
   }
 
+  // MARK: A form's label column
+
+  /// The rule editor's labels: what `ColumnLabel` lines the controls up at.
+  private static let formLabels = ["When", "Time", "Offset in minutes", "Repeat on", "Switch to"]
+
+  private func labelRow(_ label: String, column: [String], keepsTextWidth: Bool = true) -> some View {
+    DisplaysRowLayout(spacing: 12, fillsControl: true, keepsTextWidth: keepsTextWidth) {
+      ColumnLabel(text: Text(verbatim: label), column: column.map { Text(verbatim: $0) })
+        .font(.system(size: 13))
+      Color.clear.frame(minWidth: 40, maxWidth: .infinity, minHeight: 20, maxHeight: 20)
+    }
+  }
+
+  func testALabelColumnKeepsItsLabelOnOneLineBesideAFillingControlAndGoesAboveItWhenItCannot() {
+    let label = "Deslocamento em minutos"
+    let line = size(Text(verbatim: label).font(.system(size: 13)), width: 1000).height
+    XCTAssertEqual(
+      size(labelRow(label, column: [label]), width: 500).height, max(line, 20), accuracy: 1,
+      "one line beside the control")
+    XCTAssertGreaterThan(
+      size(labelRow(label, column: [label], keepsTextWidth: false), width: 500).height, max(line, 20) + 1,
+      "a row that is not a label column wraps a long label at a short word's width")
+    let narrow = size(labelRow(label, column: [label]), width: 150)
+    let text = size(Text(verbatim: label).font(.system(size: 13)), width: 150)
+    XCTAssertEqual(narrow.height, text.height + 8 + 20, accuracy: 1, "without room the control goes under it")
+  }
+
+  func testLabelsOfOneColumnTakeTheWidestLabelsWidthInEveryLanguageAndStayOnOneLine() throws {
+    for language in AppLanguage.supported {
+      let locale = PanelLocale(language: language)
+      let column = Self.formLabels.map(locale.catalogString)
+      if language != .english { XCTAssertNotEqual(column, Self.formLabels, "\(language.tag) is translated") }
+      let widest = column.map { size(Text(verbatim: $0).font(.system(size: 13)), width: 1000).width }.max() ?? 0
+      let line = size(Text(verbatim: column[0]).font(.system(size: 13)), width: 1000).height
+      for label in column {
+        let measured = size(
+          ColumnLabel(text: Text(verbatim: label), column: column.map { Text(verbatim: $0) })
+            .font(.system(size: 13)), width: 1000)
+        XCTAssertEqual(measured.width, widest, accuracy: 0.5, "\(language.tag): \(label) lines up with the widest")
+        XCTAssertEqual(
+          size(labelRow(label, column: column), width: 420).height, max(line, 20), accuracy: 1,
+          "\(language.tag): \(label) on one line beside its control")
+      }
+    }
+  }
+
   func testARowWithoutAControlStillDrawsItsText() {
     let textOnly = DisplaysRowLayout {
       Text(verbatim: longText).font(.system(size: 13))

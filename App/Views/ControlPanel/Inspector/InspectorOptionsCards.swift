@@ -15,19 +15,27 @@ struct GeneralConfigurationCard: View {
     let volumeKey = InspectorAction.wallpaperSetting(id, "volume")
     let audioKey = InspectorAction.wallpaperSetting(id, "audioResponseEnabled")
     let mediaKey = InspectorAction.wallpaperSetting(id, "mediaIntegrationEnabled")
+    let mute = controller.inspectorMuteSwitch(options)
     InspectorSection("General configuration") {
-      InspectorToggleRow(
-        title: "Mute wallpaper audio", isOn: options.isMuted,
-        isDisabled: controller.isInspectorControlDisabled(options, key: mutedKey)
-      ) { muted in
-        controller.launch(mutedKey, policy: .latestWins) { try await controller.setMuted(muted, for: id) }
+      VStack(alignment: .leading, spacing: 0) {
+        InspectorToggleRow(
+          title: "Mute this wallpaper", isOn: mute.isOn,
+          isDisabled: mute.isMutedByMuteAll || controller.isInspectorControlDisabled(options, key: mutedKey)
+        ) { muted in
+          controller.launch(mutedKey, policy: .latestWins) { try await controller.setMuted(muted, for: id) }
+        }
+        if mute.isMutedByMuteAll {
+          InspectorNote("Mute All is on, so every wallpaper is silent.")
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
       }
       InspectorSliderRow(
         title: "Volume", value: options.volume * 100, range: 0...100, step: 1,
         accessibilityLabel: L("Volume"), format: { InspectorWording.percent($0 / 100) },
         onRelease: { setVolume($0 / 100) }, onStep: { setVolume($0 / 100) }
       )
-      .disabled(controller.isInspectorControlDisabled(options, key: volumeKey) || options.isMuted)
+      .disabled(controller.isInspectorControlDisabled(options, key: volumeKey) || mute.isOn)
       InspectorToggleRow(
         title: "Audio response", isOn: options.audioResponseEnabled,
         isDisabled: controller.isInspectorControlDisabled(options, key: audioKey)
@@ -143,28 +151,57 @@ struct DisplaysCard: View {
 }
 
 /// One display's playback of the wallpaper: Enabled, Scaling mode and Scale factor, Frame rate,
-/// where the wallpaper sits, and Remove from display. Everything is saved at once except the Scale
-/// factor, a draft that waits for Apply changes.
+/// where the wallpaper sits, and Remove from display. Scaling mode, Frame rate and the position are
+/// saved at once; Enabled and the Scale factor are drafts that wait for Apply changes, and while
+/// one of them does the card shows the **Not applied** mark under its name, apart from any line
+/// that could be cut short.
+///
+/// Beside another display the card starts collapsed under a one-line summary of its settings
+/// (`InspectorWording.displaySummary`), with the mark under it; the only display's card starts
+/// open with the mark alone. A card opens when one of its settings is staged, even from another
+/// card (`InspectorPolicy.displayCardOpenByDefault`).
 struct DisplayCard: View {
   let options: InspectorOptions
   let display: InspectorOptions.DisplayRow
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  @Environment(\.inspectorEditedRow) private var editedRow
 
   var body: some View {
     let id = options.wallpaperID
     let enabledKey = InspectorAction.displayConfig(id, display: display.id, "enabled")
     let modeKey = InspectorAction.displayConfig(id, display: display.id, "scalingMode")
-    InspectorSection(verbatim: display.title, nested: true) {
+    InspectorSection(
+      verbatim: display.title, isOpen: InspectorPolicy.displayCardOpenByDefault(options, display: display),
+      opensWhen: display.hasStagedChanges, nested: true,
+      accessory: {
+        // Part of the header button: VoiceOver reads the name, the summary and the mark, then
+        // Expanded or Collapsed.
+        if InspectorPolicy.summarizesDisplays(options) {
+          let summary = InspectorWording.displaySummary(display)
+          Text(verbatim: summary)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(theme.surface.muted.color)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .help(summary)
+        }
+        if display.hasStagedChanges {
+          ModifiedMark(kind: .notApplied).padding(.top, 2)
+        }
+      }
+    ) {
       InspectorToggleRow(
         title: "Enabled", isOn: display.isEnabled,
         isDisabled: controller.isInspectorControlDisabled(options, key: enabledKey)
       ) { enabled in
+        editedRow?.note(enabledKey)
         controller.launch(enabledKey, policy: .latestWins) {
           try await controller.setDisplayEnabled(enabled, on: display.id, for: id)
         }
       }
+      .id(enabledKey)
       InspectorRow("Scaling mode") {
         Picker(
           "",
@@ -179,24 +216,47 @@ struct DisplayCard: View {
           Text("Original size").tag(BridgeScalingMode.none)
           Text("Stretch").tag(BridgeScalingMode.stretch)
           Text("Fit").tag(BridgeScalingMode.match)
+          if InspectorPolicy.offersBlurredFit(options, display: display) {
+            Text("Fit with blurred backdrop").tag(BridgeScalingMode.matchBlurred)
+          }
           Text("Fill").tag(BridgeScalingMode.fill)
         }
         .labelsHidden()
         .pickerStyle(.menu)
-        .fixedSize()
+        // A menu is as wide as its longest choice ("Fit with blurred backdrop"); held at that width
+        // it squeezed the row's name into a column one letter wide. Capped like the property menus,
+        // it truncates instead and leaves the name room.
+        .frame(minWidth: 110, maxWidth: 170)
         .accessibilityLabel("Scaling mode")
       }
       .disabled(controller.isInspectorControlDisabled(options, key: modeKey))
-      ScaleFactorRow(options: options, display: display)
-      FrameRateRow(options: options, display: display)
-      if let limit = display.frameRateLimit {
+      if InspectorPolicy.blurredFitNote(for: display) == .nativePlayer {
         InspectorCardRow {
           VStack(alignment: .leading, spacing: 4) {
-            InspectorNote(verbatim: limit.note)
-            Button(limit.section.openTitle) {
-              controller.launch("openSettings") { try await controller.openSettings(limit.section) }
+            InspectorNote(
+              "This video is drawn by the native video player, which leaves the bars black. Choose Compatibility for Video playback in Performance settings to blur them."
+            )
+            Button("Open Performance") {
+              controller.launch("openSettings") { try await controller.openSettings(.performance) }
             }
-            .buttonStyle(.inspectorLink)
+            .buttonStyle(.panelCardLink)
+          }
+        }
+      }
+      ScaleFactorRow(options: options, display: display)
+      // The native player plays a clip at the clip's own rate, so neither the display's frame rate
+      // nor a ceiling on it applies to what it draws.
+      if InspectorPolicy.offersFrameRate(for: display) {
+        FrameRateRow(options: options, display: display)
+        if let limit = display.frameRateLimit {
+          InspectorCardRow {
+            VStack(alignment: .leading, spacing: 4) {
+              InspectorNote(verbatim: limit.note)
+              Button(limit.section.openTitle) {
+                controller.launch("openSettings") { try await controller.openSettings(limit.section) }
+              }
+              .buttonStyle(.panelCardLink)
+            }
           }
         }
       }
@@ -204,14 +264,14 @@ struct DisplayCard: View {
         PositionRows(options: options, display: display)
       }
       InspectorCardRow {
-        Button {
+        Button(role: .destructive) {
           controller.launch(PanelActionCoordinator.key("eject", id: id, displayID: display.id)) {
             try await controller.eject(id, from: display.id)
           }
         } label: {
           Label("Remove from display", systemImage: "minus.circle")
         }
-        .buttonStyle(.inspectorDestructiveLink)
+        .buttonStyle(.panelCardLink)
         .disabled(options.isLocked)
       }
     }
@@ -227,16 +287,24 @@ private struct ScaleFactorRow: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  @Environment(\.inspectorEditedRow) private var editedRow
   @State private var text = ""
   @State private var issue: String?
   @FocusState private var isFocused: Bool
+
+  /// What the number does; Settings → Displays says it as the row's note.
+  private var explanation: String {
+    L(
+      "Zooms the wallpaper after scaling: 1 keeps its size, more than 1 enlarges it and crops what no longer fits, less than 1 shrinks it."
+    )
+  }
 
   var body: some View {
     let key = InspectorAction.displayConfig(options.wallpaperID, display: display.id, "scalingFactor")
     VStack(alignment: .leading, spacing: 4) {
       InspectorRow("Scale factor") {
         HStack(spacing: 4) {
-          Text(verbatim: "×").font(.system(size: 12)).foregroundStyle(theme.surface.muted.color)
+          Text(verbatim: "×").font(.panel(.callout)).foregroundStyle(theme.surface.muted.color)
           TextField("Scale factor", text: $text)
             .labelsHidden()
             .textFieldStyle(.roundedBorder)
@@ -246,11 +314,16 @@ private struct ScaleFactorRow: View {
             .focused($isFocused)
             .onSubmit(commit)
             .accessibilityLabel("Scale factor")
+            // The field is an AppKit view with its own tooltip area, so the row's help does not
+            // reach it: hovering the number itself explains it too.
+            .help(explanation)
         }
       }
+      // On the whole row as well, so hovering its name explains it.
+      .help(explanation)
       if let issue {
         Text(verbatim: issue)
-          .font(.system(size: 11.5))
+          .font(.panel(.footnote))
           .foregroundStyle(theme.surface.danger.color)
           .padding(.horizontal, 12)
           .padding(.bottom, 6)
@@ -262,6 +335,7 @@ private struct ScaleFactorRow: View {
     .onAppear { refresh() }
     .onChange(of: display.scalingFactor) { if !isFocused { refresh() } }
     .onChange(of: isFocused) { _, focused in if !focused { commit() } }
+    .id(key)
   }
 
   private func refresh() {
@@ -278,9 +352,9 @@ private struct ScaleFactorRow: View {
     issue = nil
     guard value != display.scalingFactor else { return }
     let id = options.wallpaperID
-    controller.launch(
-      InspectorAction.displayConfig(id, display: display.id, "scalingFactor"), policy: .latestWins
-    ) {
+    let key = InspectorAction.displayConfig(id, display: display.id, "scalingFactor")
+    editedRow?.note(key)
+    controller.launch(key, policy: .latestWins) {
       try await controller.setScalingFactor(value, on: display.id, for: id)
     }
   }
@@ -448,23 +522,12 @@ private struct PositionRows: View {
         } label: {
           Label("Center", systemImage: "arrow.counterclockwise")
         }
-        .buttonStyle(.inspectorLink)
+        .buttonStyle(.panelCardLink)
         .disabled(display.position.isCentered)
         .help(L("Center the wallpaper on the display"))
-        switch InspectorPolicy.positionNote(for: display) {
-        case .nativePlayer:
-          InspectorNote(
-            "This video is drawn by the native video player, which keeps it centered. Choose Compatibility for Video playback in Performance settings to move it."
-          )
-          Button("Open Performance") {
-            controller.launch("openSettings") { try await controller.openSettings(.performance) }
-          }
-          .buttonStyle(.inspectorLink)
-        case .explains:
-          InspectorNote(
-            "Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly."
-          )
-        }
+        InspectorNote(
+          "Choose which part of the wallpaper stays in view when it is larger than the display, or where it sits when it is smaller. Nothing moves when it already fits the display exactly."
+        )
       }
     }
     // A drag cut off by the rows going away settles with its newest value.

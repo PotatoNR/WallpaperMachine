@@ -79,6 +79,12 @@ extension PanelController {
   /// The library is being read for the first time or rescanned.
   var isLibraryLoading: Bool { store.libraryLoadState == .loading }
 
+  /// Why the last read of the library failed; nil while it is being read or was read.
+  var libraryLoadFailure: String? {
+    if case .failed(let message) = store.libraryLoadState { return message }
+    return nil
+  }
+
   /// Whether the preview window exists to open (it does not in a headless run).
   var previewAvailable: Bool { store.openPreview != nil }
 
@@ -90,18 +96,31 @@ extension PanelController {
       previousID: store.previousWallpaperID(displayId: target))
   }
 
+  /// When each wallpaper was last put on a display, the newest use across displays, for
+  /// Installed's Last used sort.
+  var lastUsedDates: [String: Date] { store.history.lastUsedDates() }
+
+  /// Moves whenever the history does, so a list sorted by last use knows to sort again.
+  var historyRevision: UInt64 { store.history.revision }
+
   private var supportedWallpaperIDs: Set<String> {
     Set(store.librarySnapshot.wallpapers.lazy.filter(\.supported).map(\.id))
   }
 
-  /// The problem report of an installed wallpaper: GitHub's new-issue form with the app version and
-  /// the backend drawing it, and `failure` when applying it just failed. Nil for a wallpaper that
-  /// is not installed or when the repository address cannot carry the draft.
+  /// The problem report of an installed wallpaper: GitHub's bug report form with the app version,
+  /// the backend drawing it, the properties changed from their defaults when its options are the
+  /// ones loaded, the files a scene lacks when its compatibility check found any, and `failure`
+  /// when applying it just failed. Nil for a wallpaper that is not installed or when the repository
+  /// address cannot carry the draft.
   func issueReportURL(for id: String, failure: String? = nil) -> URL? {
     guard let row = libraryRow(id: id) else { return nil }
+    let options = store.wallpaperOptionsSnapshot.flatMap { $0.wallpaperId == id ? $0 : nil }
+    let checked = compatibility.context?.wallpaperID == id ? compatibility.checks : []
     return LibraryIssueReport.url(
       for: row, failure: failure,
-      renderers: LibraryIssueReport.renderers(for: id, in: store.settingsSnapshot))
+      renderers: LibraryIssueReport.renderers(for: id, in: store.settingsSnapshot),
+      properties: options?.properties ?? [],
+      missingFiles: checked.first { $0.id == "missingFiles" }?.missingFiles ?? [])
   }
 
   // MARK: Host states and held wallpapers
@@ -172,16 +191,36 @@ extension PanelController {
     return targetDisplays.first { $0.id == id }
   }
 
-  /// The Now Playing card.
+  /// The target display's name as the Apply and Reapply buttons' help says it
+  /// (`ApplyOffer.targetName`), or nil when there is nothing to tell apart: fewer than two displays
+  /// can show a wallpaper of their own, or the target cannot. It is the name the toolbar's button
+  /// shows, without the renderer's `(id - Role)` group, and the rule Quick Settings' Wallpaper per
+  /// Desktop tile follows. Read once per inspector, never per tile.
+  var applyTargetName: String? {
+    let displays = targetDisplays
+    let id = targetDisplayID
+    guard displays.filter(\.isSelectable).count > 1,
+      let target = displays.first(where: { $0.id == id }), target.isSelectable
+    else { return nil }
+    return target.shortLabel(among: displays)
+  }
+
+  /// The Now Playing card. The bar reads it on every redraw, so what Next and Random could pick is
+  /// asked with `contains`, never by listing the candidates.
   var nowPlaying: NowPlayingState {
     let displays = targetDisplays
     let id = targetDisplayID
     let target = displays.first { $0.id == id }
+    let wallpapers = store.librarySnapshot.wallpapers
+    let held = store.heldWallpaperIDs
     return NowPlayingState.make(
       target: target, item: target?.wallpaperID.flatMap(libraryRow(id:)),
       hasWallpaper: displays.contains { $0.wallpaperID != nil },
-      hasOtherWallpaper: store.librarySnapshot.wallpapers.contains {
-        $0.supported && $0.id != target?.wallpaperID
+      hasOtherWallpaper: wallpapers.contains { $0.supported && $0.id != target?.wallpaperID },
+      // `AutomationCommand.RandomPool.all.candidates` less the one on show: a pick never reopens a
+      // wallpaper held back after a crash.
+      hasRandomCandidate: wallpapers.contains {
+        $0.supported && $0.id != target?.wallpaperID && !held.contains($0.id)
       },
       previousID: store.previousWallpaperID(displayId: id), isPaused: isPlaybackPaused,
       isBusy: isStoreBusy)

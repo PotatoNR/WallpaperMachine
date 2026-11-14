@@ -64,7 +64,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
 
   /// The lock screen as the app finds it after a launch: asked for, or left off. It only starts and
   /// recovers; no publication, activation or monitor runs.
-  private func lockScreen(requested: Bool) throws -> LockScreenWallpaperService {
+  private func lockScreen(requested: Bool) async throws -> LockScreenWallpaperService {
     let defaults = try TemporaryDefaults.make(for: self).defaults
     defaults.set(requested, forKey: "WallpaperMachineAnimateLockScreen")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -78,7 +78,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
       exchange: root, defaults: defaults,
       // Never registered with a run loop, so the monitor cannot fire during the test.
       scheduleMonitor: { _ in Timer(timeInterval: 2, repeats: true) { _ in } })
-    try service.start()
+    try await service.start()
     return service
   }
 
@@ -97,7 +97,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
         "The choice must survive a relaunch")
 
       // Animate lock screen sets the picture itself: the choice waits until it is off again.
-      panel.store.lockScreenWallpaper = try lockScreen(requested: true)
+      panel.store.lockScreenWallpaper = try await lockScreen(requested: true)
       XCTAssertTrue(controller.desktopSettings.desktopPictureLocked)
       do {
         try await controller.setWritesDesktopPicture(true)
@@ -110,7 +110,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
       XCTAssertFalse(controller.playback.writesDesktopPicture, "A refused change must not be stored")
       XCTAssertFalse(controller.desktopSettings.writesDesktopPicture)
 
-      panel.store.lockScreenWallpaper = try lockScreen(requested: false)
+      panel.store.lockScreenWallpaper = try await lockScreen(requested: false)
       XCTAssertFalse(controller.desktopSettings.desktopPictureLocked, "Off, the lock screen owns nothing")
       try await controller.setWritesDesktopPicture(true)
       XCTAssertTrue(controller.playback.writesDesktopPicture)
@@ -133,7 +133,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
       XCTAssertTrue(off.canChangeWritesDesktopPicture, "It can be turned back on")
       XCTAssertFalse(off.canChangeRefresh, "A timed retake of a picture that is not written does nothing")
 
-      panel.store.lockScreenWallpaper = try lockScreen(requested: true)
+      panel.store.lockScreenWallpaper = try await lockScreen(requested: true)
       let locked = controller.desktopSettings
       XCTAssertFalse(locked.canChangeWritesDesktopPicture)
       XCTAssertFalse(locked.writesDesktopPicture, "The lock does not change the choice")
@@ -232,7 +232,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
     try pinPanelLanguageToEnglish()
     try await withRecordingPanel { panel, _ in
       let controller = panel.controller
-      panel.store.lockScreenWallpaper = try lockScreen(requested: false)
+      panel.store.lockScreenWallpaper = try await lockScreen(requested: false)
       try panel.automations.update("primary") {
         $0.mode = .spaces
         $0.spaces["desktop-uuid"] = .init(kind: .wallpaper, id: "ocean")
@@ -302,7 +302,7 @@ final class PanelGeneralSettingsTests: PanelTestCase {
 
   func testTheLockScreenAndScreenSaverShareTheServiceBusyFlagButNotTheirRequests() async throws {
     try await withRecordingPanel { panel, _ in
-      panel.store.lockScreenWallpaper = try lockScreen(requested: true)
+      panel.store.lockScreenWallpaper = try await lockScreen(requested: true)
       let lock = panel.controller.lockScreenState
       let saver = panel.controller.screenSaverState
       XCTAssertTrue(lock.isRequested)

@@ -90,7 +90,7 @@ struct SettingsUnavailableNotice: View {
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(
         theme.surface.warning.color.opacity(0.12),
-        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        in: RoundedRectangle(cornerRadius: PanelCardSurface.cornerRadius, style: .continuous)
       )
       .accessibilityElement(children: .combine)
     }

@@ -14,11 +14,11 @@ struct InstalledTile: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
-  @Environment(\.isFocused) private var isFocused
+  @Environment(\.libraryCollectionTile) private var collectionTile
+  @Environment(\.locale) private var locale
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
   @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
-  @State private var isHovering = false
 
   /// Whether the check and the heart stay in the tile while they are hidden, so VoiceOver and
   /// Switch Control can always reach them. Otherwise they are built only while they show: two
@@ -34,8 +34,9 @@ struct InstalledTile: View {
     let isArming = model.armingID == row.id
     let marks = LibraryTileMarks(row, isFavorite: isFavorite)
     let chrome = LibraryTileChrome(
-      isChecked: isChecked, isChosen: isChosen, isFavorite: isFavorite, isHovering: isHovering,
-      isFocused: isFocused, isArming: isArming, isSelecting: model.isSelecting,
+      isChecked: isChecked, isChosen: isChosen, isFavorite: isFavorite,
+      isHovering: collectionTile?.isHovering ?? false,
+      isFocused: collectionTile?.isFocused ?? false, isArming: isArming, isSelecting: model.isSelecting,
       hasSelection: !model.selection.isEmpty)
     let kind = row.kind.label
     // The tile reads as selected only while the inspector shows it, as the web panel's tile did;
@@ -82,12 +83,14 @@ struct InstalledTile: View {
     .scaleEffect(isArming ? 0.97 : 1)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: isArming)
     .onTapGesture { click(model) }
-    .onHover { hovering in
-      isHovering = hovering
-      if hovering { model.pointerEntered(row.id) } else { model.pointerLeft(row.id) }
+    // A right click offers what the inspector's More menu does, for this tile, without choosing
+    // it first. The items are one view, built when the menu opens: a tile that scrolls by pays
+    // for none of them.
+    .contextMenu {
+      WallpaperActionItems(row: row, placement: .tile)
+        .environment(controller)
+        .environment(\.locale, locale)
     }
-    .onChange(of: isFocused) { model.focusChanged(row.id, isFocused: isFocused) }
-    .onGeometryChange(for: CGSize.self, of: \.size) { model.geometry.cellSize = $0 }
     .accessibilityValue(Text(verbatim: marks.names.joined(separator: ", ")))
     .accessibilityAddTraits(.isButton)
     .accessibilityAction { model.tileActivated(row.id) }
@@ -98,7 +101,7 @@ struct InstalledTile: View {
   // MARK: Artwork
 
   /// The cover once its stamp is known, and the quiet placeholder until then and for a wallpaper
-  /// with no preview; the one tile that plays its animation draws it over the cover.
+  /// with no preview; a tile that plays its animation draws it over the cover.
   private func artwork(_ model: InstalledBrowserModel) -> some View {
     ZStack {
       PanelImage(source: row.coverSource, pointSize: 190)
@@ -109,8 +112,8 @@ struct InstalledTile: View {
           .font(.system(size: 22, weight: .regular))
           .foregroundStyle(theme.surface.faint.color)
       }
-      if let live = model.livePreview, live.id == row.id {
-        AnimatedPreview(data: live.data, isPlaying: true)
+      if let animation = model.playingAnimation(for: row.id) {
+        AnimatedPreview(data: animation, isPlaying: true)
       }
       applyState
     }
@@ -127,12 +130,13 @@ struct InstalledTile: View {
   private var applyState: some View {
     if controller.applyingWallpaperID == row.id {
       ZStack {
-        Color.black.opacity(0.5)
+        // Words straight on the picture: the stronger scrim keeps them readable on a bright one.
+        theme.surface.scrimStrong.color
         VStack(spacing: 5) {
           ProgressRing(value: nil, lineWidth: 2.5).frame(width: 26, height: 26)
-          Text("Applying").font(.system(size: 11, weight: .semibold))
+          Text("Applying").font(.panel(.badge))
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(theme.surface.markGlyph.color)
       }
       .allowsHitTesting(false)
       .accessibilityElement(children: .ignore)
@@ -140,12 +144,13 @@ struct InstalledTile: View {
       .accessibilityAddTraits(.updatesFrequently)
     } else if controller.queuedApplyIDs.contains(row.id) {
       ZStack {
-        Color.black.opacity(0.4)
-        Image(systemName: "play.fill")
-          .font(.system(size: 12, weight: .semibold))
-          .foregroundStyle(.white)
+        // The picture and the disc of a Steam Workshop tile's waiting ring.
+        theme.surface.scrim.color
+        Image(systemName: ApplyOffer.symbol)
+          .font(.panel(.calloutStrong))
+          .foregroundStyle(theme.surface.markGlyph.color)
           .frame(width: 30, height: 30)
-          .background(.white.opacity(0.18), in: Circle())
+          .background { ArtworkDisc() }
       }
       .allowsHitTesting(false)
       .accessibilityElement(children: .ignore)
@@ -187,14 +192,8 @@ struct InstalledTile: View {
   private func markBadges(_ marks: LibraryTileMarks) -> some View {
     if marks.isApproved || marks.hasUpdate {
       HStack(spacing: 4) {
-        if marks.isApproved {
-          TileMark(systemImage: "trophy.fill", color: theme.surface.approved.color)
-            .help(L("Approved by Wallpaper Engine"))
-        }
-        if marks.hasUpdate {
-          TileMark(systemImage: "arrow.down", color: theme.accent.control.color)
-            .help(L("Update available"))
-        }
+        if marks.isApproved { TileMarkChip(.approved) }
+        if marks.hasUpdate { TileMarkChip(.update) }
       }
     }
   }
@@ -219,15 +218,17 @@ private struct TileDisc: View {
   let systemImage: String
   var isOn = false
   var onColor: Color
-  var onFill: Color = .white.opacity(0.94)
+
+  @Environment(\.panelTheme) private var theme
 
   var body: some View {
+    let surface = theme.surface
     Image(systemName: systemImage)
       .font(.system(size: 12, weight: .bold))
-      .foregroundStyle(isOn ? onColor : .white)
+      .foregroundStyle(isOn ? onColor : surface.markGlyph.color)
       .frame(width: LibraryGridGeometry.controlSize, height: LibraryGridGeometry.controlSize)
-      .background(isOn ? onFill : .black.opacity(0.42), in: Circle())
-      .overlay { Circle().strokeBorder(.white.opacity(isOn ? 0 : 0.35), lineWidth: 0.75) }
+      .background(isOn ? surface.markGlyph.color.opacity(0.94) : surface.controlFill.color, in: Circle())
+      .overlay { Circle().strokeBorder(isOn ? .clear : surface.controlRim.color, lineWidth: 0.75) }
       .contentShape(Circle())
   }
 }
@@ -254,14 +255,14 @@ private struct TileCheck: View {
     let isFilled = isOn || isArming
     Button(action: action) {
       // An unticked check is a hollow ring, as in Photos; the mark appears once it is ticked.
-      Image(systemName: "checkmark")
+      Image(systemName: LibraryTileChrome.checkSymbol)
         .font(.system(size: 12, weight: .bold))
         .foregroundStyle(theme.accent.onPrimary.color)
         .opacity(isOn ? 1 : 0)
         .frame(width: LibraryGridGeometry.controlSize, height: LibraryGridGeometry.controlSize)
         .background {
           ZStack {
-            Circle().fill(.black.opacity(0.42))
+            Circle().fill(theme.surface.controlFill.color)
             // The hold's 350 ms, as long as the tile takes to sink in; a ticked check is full.
             Circle().fill(theme.accent.primary.color)
               .scaleEffect(isFilled ? 1 : 0.01)
@@ -269,7 +270,10 @@ private struct TileCheck: View {
                 isOn || reduceMotion ? nil : .easeIn(duration: 0.35), value: isFilled)
           }
         }
-        .overlay { Circle().strokeBorder(.white.opacity(isFilled ? 0 : 0.7), lineWidth: 1.25) }
+        .overlay {
+          Circle().strokeBorder(
+            theme.surface.markGlyph.color.opacity(isFilled ? 0 : 0.7), lineWidth: 1.25)
+        }
         .contentShape(Circle())
     }
     .buttonStyle(DiscButtonStyle())
@@ -300,19 +304,5 @@ private struct TileHeart: View {
     .accessibilityLabel(
       Text(verbatim: isOn ? L("Remove favorite: \(title)") : L("Add favorite: \(title)")))
     .accessibilityAddTraits(isOn ? .isSelected : [])
-  }
-}
-
-/// A small white disc with a coloured glyph: approved, update available.
-private struct TileMark: View {
-  let systemImage: String
-  let color: Color
-
-  var body: some View {
-    Image(systemName: systemImage)
-      .font(.system(size: 9.5, weight: .bold))
-      .foregroundStyle(color)
-      .frame(width: 18, height: 18)
-      .background(.white.opacity(0.94), in: Circle())
   }
 }

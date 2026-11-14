@@ -38,7 +38,8 @@ final class PanelRootRenderTests: PanelTestCase {
         rootView: ControlPanelView(
           store: store, navigation: navigation, workshop: workshop, pixiv: PixivStore(),
           updater: AppUpdateStore(currentVersion: "0.1.0", client: DisabledAppUpdateClient()),
-          imports: LibraryImportStore(), defaults: defaults, appLanguage: languages))
+          imports: LibraryImportStore(), defaults: defaults, appLanguage: languages,
+          searchTranslation: .fake(defaults: defaults, language: languages)))
       hosting.sizingOptions = []
       hosting.sceneBridgingOptions = [.toolbars, .title]
       window = ControlPanelWindow.make(contentViewController: hosting, delegate: nil)
@@ -180,14 +181,13 @@ final class PanelRootRenderTests: PanelTestCase {
     }
   }
 
-  /// The panel is drawn in the language its controller follows: in Japanese and in both Chinese
-  /// scripts every one of those words differs from the English panel, is written in that script and
-  /// keeps no placeholder.
+  /// The panel is drawn in the language its controller follows: in every other language these words
+  /// differ from the English panel, use that language's script and keep no placeholder.
   func testThePanelIsDrawnInTheLanguageItsControllerFollows() async throws {
     let (store, bridge) = makeStore()
     try await ShellFixtures.seed(store, bridge: bridge)
     var english: DrawnWords?
-    for language in ["en", "ja", "zh-Hans", "zh-Hant"] {
+    for language in AppLanguage.supported.map(\.tag) {
       let harness = try Harness(test: self, store: store, language: language)
       let words = try await drawnWords(harness)
       await harness.close()
@@ -197,7 +197,7 @@ final class PanelRootRenderTests: PanelTestCase {
       }
       for ((name, text), (_, englishText)) in zip(words.all, english.all) {
         XCTAssertNotEqual(text, englishText, "\(language): the \(name) is not translated")
-        XCTAssertTrue(Self.isCJK(text), "\(language): the \(name) “\(text)” is not in its script")
+        XCTAssertTrue(Self.isInScript(text, of: language), "\(language): the \(name) “\(text)” is not in its script")
         XCTAssertFalse(text.contains("%"), "\(language): the \(name) “\(text)” keeps a placeholder")
       }
     }
@@ -276,10 +276,20 @@ final class PanelRootRenderTests: PanelTestCase {
     return nil
   }
 
-  /// Whether the text holds kana or Han ideographs.
+  /// Whether the text is in the language's script: Latin-script languages must not fall back to
+  /// CJK text; the others must show their own script.
+  private static func isInScript(_ text: String, of language: String) -> Bool {
+    let latin: Set<String> = ["pt-BR"]
+    return latin.contains(language) ? !isCJK(text) && text.contains { $0.isLetter } : isCJK(text)
+  }
+
+  /// Whether the text holds kana, Hangul or Han ideographs.
   private static func isCJK(_ text: String) -> Bool {
     text.unicodeScalars.contains { scalar in
-      [0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF].contains {
+      [
+        0x1100...0x11FF, 0x3040...0x30FF, 0x3130...0x318F, 0x3400...0x4DBF,
+        0x4E00...0x9FFF, 0xAC00...0xD7A3, 0xF900...0xFAFF,
+      ].contains {
         $0.contains(scalar.value)
       }
     }

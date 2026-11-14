@@ -7,9 +7,16 @@ struct CollectionsCard: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
-  @State private var isNaming = false
+  @State private var isNaming: Bool
   @State private var name = ""
   @FocusState private var nameFocused: Bool
+
+  /// `isNaming` is whether the card starts with its name field open; the inspector starts it
+  /// closed.
+  init(wallpaperID: String, isNaming: Bool = false) {
+    self.wallpaperID = wallpaperID
+    _isNaming = State(initialValue: isNaming)
+  }
 
   private func key(_ collection: CollectionRow) -> String {
     PanelActionCoordinator.key("collectionMember", id: collection.id, detail: wallpaperID)
@@ -70,7 +77,7 @@ struct CollectionsCard: View {
                 .buttonStyle(.panelPrimary(size: .compact))
                 .disabled(trimmedName.isEmpty || controller.isBusy(createKey))
               Button("Cancel") { cancel() }
-                .buttonStyle(.inspectorSecondary)
+                .buttonStyle(.panelSecondary(size: .compact))
             }
           }
           .onAppear { nameFocused = true }
@@ -81,7 +88,7 @@ struct CollectionsCard: View {
           } label: {
             Label("New collection…", systemImage: "plus")
           }
-          .buttonStyle(.inspectorLink)
+          .buttonStyle(.panelCardLink)
         }
       }
     }

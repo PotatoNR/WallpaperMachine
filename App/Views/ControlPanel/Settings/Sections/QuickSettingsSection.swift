@@ -12,14 +12,18 @@ struct QuickSettingsSection: View {
     id: "quick.tile-open-at-login", section: .quick, title: "Open at Login")
   static let muteAll = SettingsItem(
     id: "quick.tile-mute-all", section: .quick, title: "Mute All")
+  // The feature's noun, not the status menu's “Lock Screen” command.
   static let lockScreen = SettingsItem(
-    id: "quick.tile-lock-screen", section: .quick, title: "Lock Screen",
+    id: "quick.tile-lock-screen", section: .quick, title: "Lock screen",
     keywords: ["Experimental"])
   static let screenSaver = SettingsItem(
     id: "quick.tile-screen-saver", section: .quick, title: "Screen Saver",
     keywords: ["Experimental"])
   static let desktopPicture = SettingsItem(
     id: "quick.tile-desktop-picture", section: .quick, title: "Desktop Picture")
+  static let desktopWallpapers = SettingsItem(
+    id: "quick.tile-desktop-wallpapers", section: .quick, title: "Wallpaper per Desktop",
+    keywords: ["Different wallpaper for each desktop", "Spaces"])
   static let activeDisplayOnly = SettingsItem(
     id: "quick.tile-active-display-only", section: .quick, title: "Active Display Only")
   static let hideAfterApplying = SettingsItem(
@@ -37,19 +41,20 @@ struct QuickSettingsSection: View {
     keywords: ["Keep running", "Reduced quality", "Pause"])
   static let covered = SettingsItem(
     id: "quick.module-covered", section: .quick, title: "When windows cover the desktop",
-    keywords: ["Pause", "Keep running"])
+    keywords: ["Pause", "Mute", "Reduce volume", "Keep running"])
   static let appearance = SettingsItem(
     id: "quick.module-appearance", section: .quick, title: "Appearance",
     keywords: ["System (Auto)", "Light", "Dark"])
 
   static let items = [
-    openAtLogin, muteAll, lockScreen, screenSaver, desktopPicture, activeDisplayOnly,
+    openAtLogin, muteAll, lockScreen, screenSaver, desktopPicture, desktopWallpapers, activeDisplayOnly,
     hideAfterApplying, liveEdits, quality, onBattery, covered, appearance,
   ]
 
   private static let tileItems: [SettingsSwitchKey: SettingsItem] = [
     .launchAtLogin: openAtLogin, .wallpapersMuted: muteAll, .lockScreenEnabled: lockScreen,
     .screenSaverEnabled: screenSaver, .writeDesktopPicture: desktopPicture,
+    .desktopWallpapers: desktopWallpapers,
     .playOnlyOnActiveDisplay: activeDisplayOnly, .hideAfterActivating: hideAfterApplying,
     .livePropertyEdits: liveEdits,
   ]

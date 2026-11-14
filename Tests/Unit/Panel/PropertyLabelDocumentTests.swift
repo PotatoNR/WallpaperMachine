@@ -231,8 +231,7 @@ final class PropertyLabelDocumentTests: XCTestCase {
     let document = parse(
       "<b>Bold</b> and <font color=red>red</font> <a href=\"https://github.com/o/r\">link</a>")
     let paragraph = try XCTUnwrap(paragraph(document.blocks.first))
-    let attributed = PropertyLabelView.attributed(
-      paragraph, baseSize: 13, baseWeight: .regular, accent: .blue)
+    let attributed = PropertyLabelView.attributed(paragraph, role: .body, accent: .blue)
     XCTAssertEqual(String(attributed.characters), "Bold and red link")
     let links = attributed.runs.compactMap(\.link)
     XCTAssertEqual(links.map(\.absoluteString), ["https://github.com/o/r"])

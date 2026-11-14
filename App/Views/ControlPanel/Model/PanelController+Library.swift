@@ -17,17 +17,29 @@ extension PanelController {
 
   /// `activate`: applies a wallpaper to the target display. Applying what a display already shows
   /// does nothing; only `reapply` restarts it, so a double-click, Recently used and Previous keep
-  /// leaving a running wallpaper alone.
+  /// leaving a running wallpaper alone. A scene while the shared resources are missing opens their
+  /// setup instead (`getsSceneResourcesInstead(of:)`), as `reapply` and `activateAll` do.
   func activate(_ id: String) async throws { try await applyToTarget(id, restarts: false) }
 
   /// `reapplyWallpaper`: the inspector's Reapply wallpaper, which takes the wallpaper off the
   /// display and loads it afresh (or applies it plainly when the display does not show it).
   func reapply(_ id: String) async throws { try await applyToTarget(id, restarts: true) }
 
+  /// An inspector's Apply wallpaper or Reapply wallpaper, as the offer decided it.
+  func apply(_ offer: ApplyOffer) async throws {
+    if offer.reapplies {
+      try await reapply(offer.wallpaperID)
+    } else {
+      try await activate(offer.wallpaperID)
+    }
+  }
+
   /// `activateAll`: one wallpaper on every enabled independent display. The transfer takes its
   /// own turn in the queue, so it must not run inside `run(.queued)`; it rolls every display back
   /// when one fails, and says so. A failure leaves the wallpaper selected, where its note is.
   func activateAll(_ id: String) async throws {
+    if try await getsSceneResourcesInstead(of: id) { return }
+    guard await confirmsUndrawableScene(id) else { return }
     do {
       try await run(.direct) {
         let id = try installedWallpaperID(id)
@@ -61,7 +73,11 @@ extension PanelController {
     let displayID = try standaloneDisplayID(displayID)
     guard playlists.playlist(for: displayID).mode == .rotate else {
       try await run(.queued, slot: BridgeStore.activationSlot(displayId: displayID)) {
-        guard let id = store.nextWallpaperID(displayId: displayID) else { return }
+        // Said, as a rotating playlist with nothing else to show says it below: a button or a
+        // shortcut that does nothing looks broken.
+        guard let id = store.nextWallpaperID(displayId: displayID) else {
+          throw WallpaperActionError(message: L("There is no other wallpaper to change to."))
+        }
         try await store.activateWallpaperAsync(id: id, displayId: displayID, origin: .user)
       }
       return
@@ -74,12 +90,33 @@ extension PanelController {
     }
   }
 
+  /// `randomWallpaper`, the menu bar's Random Wallpaper rule: a wallpaper from the whole library
+  /// that can play, other than the one on show and never one held back after a crash, each coming
+  /// round before one repeats, picked when the display's turn comes; with nothing to pick it says
+  /// so. The store queues the pick on the display's own slot (`activateRandomWallpaperAsync`), so
+  /// this runs it directly. The favorites and the playlists are the controller's own.
+  /// `displayID` is the target display when it names none.
+  func randomWallpaper(displayID: String? = nil) async throws {
+    let displayID = try standaloneDisplayID(displayID)
+    try await run(.direct) {
+      try await store.activateRandomWallpaperAsync(
+        displayId: displayID, pool: .all, favorites: favoriteIDs, playlists: playlists)
+    }
+  }
+
   /// Applies or restarts `id` on the display targeted *now*, which is the one the user means:
-  /// the command may wait behind others, and the target can change in the meantime.
+  /// the command may wait behind others, and the target can change in the meantime. It is read
+  /// before anything here waits (the shared resources, reading a refused scene again), so the
+  /// display that is checked and the one applied to are the one the user had chosen.
   private func applyToTarget(_ id: String, restarts: Bool) async throws {
+    let displayID = navigation.targetDisplayID
+    if try await getsSceneResourcesInstead(of: id) { return }
+    // Restarting a scene, or choosing the one the display shows, puts up nothing new.
+    if !restarts, !store.isWallpaperActive(id: id, displayId: displayID) {
+      guard await confirmsUndrawableScene(id) else { return }
+    }
     do {
       let id = try installedWallpaperID(id)
-      let displayID = navigation.targetDisplayID
       let slot = BridgeStore.activationSlot(displayId: displayID)
       let ran = try await run(.queued, slot: slot, subject: id) {
         if restarts {
@@ -103,6 +140,50 @@ extension PanelController {
     }
   }
 
+  /// A scene Native Metal is known not to draw with this build and these files (it was refused when
+  /// it last ran or was checked) asks before it replaces what is on screen: applied, it shows its
+  /// preview picture. True to go ahead, which is also the answer for anything else. Only the
+  /// user's own Apply asks; a playlist, a schedule or a shortcut never waits on a question.
+  ///
+  /// The remembered refusal is only where the question starts. What the scene draws with also lies
+  /// outside the files that key it (the shared resources, loose files, the saved options), so the
+  /// scene is read again first and that answer is recorded: a refusal that no longer holds asks
+  /// nothing. When it cannot be read again, the remembered refusal asks.
+  private func confirmsUndrawableScene(_ id: String) async -> Bool {
+    guard let row = libraryRow(id: id), row.kind == .scene, let verdicts = store.sceneDrawVerdicts,
+      let verdict = await verdicts.verdict(for: id), verdict.outcome == .notDrawn
+    else { return true }
+    var refusal = verdict.reason
+    if let read = try? await store.bridge.sceneCapability(wallpaperId: id), read.readError == nil {
+      await verdicts.record(
+        id, outcome: read.failureStage == nil ? .passedCheck : .notDrawn, stage: read.failureStage,
+        reason: read.failureReason)
+      guard read.failureStage != nil else { return true }
+      refusal = read.failureReason
+    }
+    let reason = refusal.flatMap { $0.isEmpty ? nil : $0 } ?? L("no reason was given")
+    return await dialogs.confirm(
+      L("Native Metal can’t draw this scene"),
+      detail: L("It was refused when it last ran or was checked with this version of the app: \(reason). Applied, it shows its preview picture instead of moving."),
+      button: L("Apply Anyway"))
+  }
+
+  /// A scene cannot play without Wallpaper Engine's shared resources, and while they are missing
+  /// applying one is the way into their one-time setup: the request for them is made (the download
+  /// dialog opens on what it needs, or their running download is shown) and the renderer is not
+  /// asked for a failure the user could only report. They are looked for again first, in case
+  /// they were installed meanwhile. Returns whether it did so; anything but an installed scene
+  /// that macOS can play is left to the apply.
+  private func getsSceneResourcesInstead(of id: String) async throws -> Bool {
+    guard let row = libraryRow(id: id), row.kind == .scene, row.isSupported else { return false }
+    workshop.refreshSceneAssetsReadiness()
+    guard workshopSceneAssetsAreMissing(for: row) else { return false }
+    // The notice that offers the resources says why it cannot play now.
+    activationFailures[id] = nil
+    try await getSceneResources()
+    return true
+  }
+
   /// Keeps why Apply last failed for `id`, which the inspector and the tile show with a report
   /// link until an apply of that wallpaper succeeds. A cancellation is the window going away.
   private func recordActivationFailure(_ error: Error, for id: String) {
@@ -120,6 +201,19 @@ extension PanelController {
       let id = try installedWallpaperID(id)
       if !favoriteIDs.insert(id).inserted { favoriteIDs.remove(id) }
       try PanelPreferences.saveFavorites(favoriteIDs, in: defaults)
+    }
+  }
+
+  /// `favoriteMany`: makes every installed wallpaper of `ids` a favorite, or takes them all out.
+  /// Direct, like `toggleFavorite`, and one write whatever the number.
+  func setFavorite(_ favorite: Bool, ids: [String]) async throws {
+    try await run(.direct) {
+      let ids = try installedWallpaperIDs(ids)
+      var updated = favoriteIDs
+      if favorite { updated.formUnion(ids) } else { updated.subtract(ids) }
+      guard updated != favoriteIDs else { return }
+      try PanelPreferences.saveFavorites(updated, in: defaults)
+      favoriteIDs = updated
     }
   }
 

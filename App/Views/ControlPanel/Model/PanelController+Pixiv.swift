@@ -187,6 +187,13 @@ extension PanelController {
   /// Forgets the session, here and in the keychain, and locks R-18 works again: an R-18 work that
   /// was selected is deselected, and the listing reloads as an anonymous visitor sees it.
   func pixivSignOut() async throws {
-    try await run(.immediate) { pixiv.signOut() }
+    try await run(.immediate) {
+      do {
+        try pixiv.signOut()
+      } catch {
+        // Still signed in, as the page keeps showing: the keychain kept the session.
+        throw WallpaperActionError(message: L("Could not log out of pixiv: \(error.localizedDescription)"))
+      }
+    }
   }
 }

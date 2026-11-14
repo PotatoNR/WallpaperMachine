@@ -91,6 +91,69 @@ final class PanelWorkshopTileTests: MediaPanelTestCase {
     }
   }
 
+  /// The inspector's Apply is enabled where a double click on the tile applies, and restarts the
+  /// wallpaper instead of applying it where the target display shows it already.
+  func testAnInstalledItemsApplyIsOfferedWhereItsDoubleClickAppliesAndReappliesWhatTheTargetShows()
+    async throws
+  {
+    try await withPanel { panel in
+      let controller = panel.controller
+      let wanted = item()
+      panel.workshop.selectedItem = wanted
+      XCTAssertFalse(controller.workshopApplyOffer(for: wanted).isEnabled, "not in the library yet")
+
+      panel.store.librarySnapshot.wallpapers = [library("222")]
+      var offer = controller.workshopApplyOffer(for: wanted)
+      XCTAssertTrue(offer.isEnabled)
+      XCTAssertFalse(offer.reapplies)
+      XCTAssertEqual(offer.key, PanelActionCoordinator.key("activate", id: "222"))
+      XCTAssertEqual(controller.workshopDoubleClick(for: wanted), .apply, "the tile applies it too")
+
+      let target = try XCTUnwrap(panel.store.settingsSnapshot.displays.first?.displayId)
+      panel.store.monitorInformationSnapshot.rows = [
+        BridgeMonitorInfoRow(
+          displayId: target, title: "Primary", wallpaperId: "222", wallpaperTitle: "W",
+          mirrorTargetDisplayId: nil, mirrorTargetTitle: nil, scalingMode: "fill", targetFps: "30",
+          audioResponse: false)
+      ]
+      offer = controller.workshopApplyOffer(for: wanted)
+      XCTAssertTrue(offer.isEnabled, "what the target shows can be restarted")
+      XCTAssertTrue(offer.reapplies)
+      XCTAssertEqual(offer.key, PanelActionCoordinator.key("reapplyWallpaper", id: "222"))
+      panel.store.monitorInformationSnapshot.rows = []
+
+      panel.store.librarySnapshot.wallpapers = [library("222", kind: .unknown)]
+      XCTAssertFalse(controller.workshopApplyOffer(for: wanted).isEnabled, "a type this version cannot run")
+      XCTAssertEqual(controller.workshopDoubleClick(for: wanted), .select)
+
+      panel.store.librarySnapshot.wallpapers = [library("222")]
+      panel.store.settingsSnapshot.displays[0].mode = .mirror
+      XCTAssertFalse(controller.workshopApplyOffer(for: wanted).isEnabled, "a mirror cannot take it")
+      XCTAssertEqual(controller.workshopDoubleClick(for: wanted), .select)
+    }
+  }
+
+  /// With two displays that can take a wallpaper, the Workshop inspector's Apply says in its help
+  /// which one it applies to, as the Installed inspector's does; with one, it says only the verb.
+  func testAnInstalledItemsApplyNamesTheTargetOnlyWhenAnotherDisplayCouldTakeIt() async throws {
+    try await withPanel { panel in
+      let controller = panel.controller
+      let wanted = item()
+      panel.configureDisplays()
+      panel.store.librarySnapshot.wallpapers = [library("222")]
+      let named = controller.workshopApplyOffer(for: wanted)
+      let name = try XCTUnwrap(named.targetName)
+      XCTAssertEqual(name, controller.applyTargetName)
+      XCTAssertTrue(named.help.contains(name))
+      XCTAssertNotEqual(named.help, named.title)
+
+      panel.store.settingsSnapshot.displays[1].mode = .mirror
+      let unnamed = controller.workshopApplyOffer(for: wanted)
+      XCTAssertNil(unnamed.targetName)
+      XCTAssertEqual(unnamed.help, unnamed.title)
+    }
+  }
+
   func testADoubleClickOnADownloadUnderWayOnlySelectsIt() async throws {
     try await withPanel { panel in
       let controller = panel.controller

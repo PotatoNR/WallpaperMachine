@@ -24,8 +24,10 @@ extension PanelController {
       nextTarget: automations.next[display]?.target,
       isFocused: automations.focusedDisplays.contains(display), error: automations.errors[display],
       spacesAvailable: spaces.available && desktops != nil && !blocked, spacesBlocked: blocked,
-      desktops: (desktops?.spaces ?? []).map {
-        AutomationState.Desktop(id: $0.id, number: $0.number, target: configuration.spaces[$0.id])
+      desktops: (desktops?.spaces ?? []).enumerated().map { index, desktop in
+        AutomationState.Desktop(
+          id: desktop.id, number: desktop.number, target: configuration.spaces[desktop.id],
+          firstDesktopTarget: index == 0 ? nil : desktops?.spaces.first.flatMap { configuration.spaces[$0.id] })
       },
       currentDesktop: desktops?.current,
       missingDesktops: desktops.map { info in
@@ -39,6 +41,12 @@ extension PanelController {
   var solarLocation: WallpaperSolarLocation? {
     _ = revisions.automationSettings
     return automations.location
+  }
+
+  /// Where the sun rules take their times from, and the fixed times when that is the source.
+  var solarSettings: WallpaperSolarSettings {
+    _ = revisions.automationSettings
+    return automations.solar
   }
 
   /// Why the saved automatic rules could not all be read, when they could not.
@@ -62,13 +70,42 @@ extension PanelController {
 
   // MARK: Actions
 
-  /// `automationMode`. Follow desktop Space needs Space information for the display and no animated
-  /// lock screen.
+  /// `automationMode`. Different wallpaper for each desktop needs Space information for the display
+  /// and no animated lock screen.
   func setAutomationMode(_ mode: DisplayWallpaperAutomation.Mode, display: String? = nil) async throws {
+    // Chosen from the mode menu, a wallpaper for each desktop starts as the switch starts it.
+    if mode == .spaces { return try await setDesktopWallpapers(true, display: display) }
     try await run(.immediate) {
       let display = try standaloneDisplayID(display)
-      if mode == .spaces { _ = try requireSpaceInformation(display) }
       try automations.update(display) { $0.mode = mode }
+    }
+  }
+
+  /// `desktopWallpapers`: whether the display keeps a wallpaper of its own for each desktop. On, it
+  /// takes the place of the display's other automatic selection, and the desktop the person is on
+  /// and Desktop 1, which every desktop without a choice follows, keep the wallpaper it shows;
+  /// off, the display keeps what it shows now, on every desktop.
+  func setDesktopWallpapers(_ on: Bool, display: String? = nil) async throws {
+    try await run(.immediate) {
+      let display = try standaloneDisplayID(display)
+      guard on else {
+        if automations.configuration(for: display).mode == .spaces {
+          try automations.update(display) { $0.mode = .off }
+        }
+        return
+      }
+      let info = try requireSpaceInformation(display)
+      let shown = store.shownWallpaperID(on: display).flatMap { id in
+        store.librarySnapshot.wallpapers.contains { $0.id == id && $0.supported } ? id : nil
+      }
+      try automations.update(display) { configuration in
+        configuration.mode = .spaces
+        guard let shown else { return }
+        for desktop in [info.current, info.spaces.first?.id].compactMap({ $0 })
+        where configuration.spaces[desktop] == nil {
+          configuration.spaces[desktop] = WallpaperAutomationTarget(kind: .wallpaper, id: shown)
+        }
+      }
     }
   }
 
@@ -155,6 +192,38 @@ extension PanelController {
   /// `automationClearLocation`.
   func clearSolarLocation() async throws {
     try await run(.immediate) { try automations.setLocation(nil) }
+  }
+
+  /// `automationSolarSource`: a deliberate source choice may ask for location access. Restoring
+  /// saved settings does not use this action and therefore never prompts.
+  func setSolarSource(_ source: WallpaperSolarSource) async throws {
+    var value = automations.solar
+    value.source = source
+    try await run(.immediate) {
+      try automations.setSolar(value)
+      if source == .automatic { solarLocationTracker.requestAuthorization() }
+    }
+  }
+
+  /// `automationSolarLocate`: retries an undecided location request from the automatic source.
+  func requestSolarLocation() async throws {
+    try await run(.immediate) { solarLocationTracker.requestAuthorization() }
+  }
+
+  /// `automationSolarSettings`: opens the system pane after the user denied access.
+  func showSolarLocationSettings() async throws {
+    try await run(.immediate) { solarLocationTracker.openSettings() }
+  }
+
+  /// `automationSolarFixedTimes`: the clock times the fixed source switches at.
+  func setSolarFixedTimes(sunriseMinute: Int, sunsetMinute: Int) async throws {
+    guard (0..<1440).contains(sunriseMinute), (0..<1440).contains(sunsetMinute) else {
+      throw InvalidControlValue()
+    }
+    var value = automations.solar
+    value.fixedSunriseMinute = sunriseMinute
+    value.fixedSunsetMinute = sunsetMinute
+    try await run(.immediate) { try automations.setSolar(value) }
   }
 
   /// `automationRetry`: tries again the change that failed.

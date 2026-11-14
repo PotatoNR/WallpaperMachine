@@ -125,7 +125,7 @@ final class SupportPromptStoreTests: XCTestCase {
         XCTAssertTrue(store.isPending)
     }
 
-    // MARK: - Scheduling of the three prompts
+    // MARK: - Scheduling of the prompts
 
     private let day: TimeInterval = 86_400
     private var calendar: Calendar {
@@ -142,13 +142,63 @@ final class SupportPromptStoreTests: XCTestCase {
     func testOnlyOnePromptADayInPriorityOrder() {
         let store = SupportPromptStore(defaults: defaults, calendar: calendar)
         store.recordDownload(wallpaperID: "downloaded")
-        store.recordSuccessfulActivation(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded", now: start)
         XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start), .telemetry)
 
         store.markPresented(.telemetry, now: start)
         XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 60),
                      "a second prompt waits for another day")
         XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + day), .support)
+    }
+
+    /// The support offer waits a day after the apply that earns it, a relaunch included, and a
+    /// panel window shown before that mark keeps it back until it is shown again.
+    func testTheSupportOfferWaitsADayAfterTheApplyThatEarnsIt() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded", now: start)
+        XCTAssertTrue(store.isPending, "Earned")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start), "but not offered right away")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start + day - 60),
+                     "nor a minute short of a day later")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start + day), .support)
+        XCTAssertEqual(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start + day), .support,
+                       "a relaunch keeps the clock")
+
+        XCTAssertNil(store.pendingPrompt(
+            welcomeSeen: true, telemetryOn: true, now: start + 2 * day, shownSince: start + day - 60),
+                     "a window shown before the mark and still open is not interrupted")
+        XCTAssertEqual(store.pendingPrompt(
+            welcomeSeen: true, telemetryOn: true, now: start + 2 * day, shownSince: start + day), .support,
+                       "the next time it is shown")
+        XCTAssertTrue(store.isPending)
+    }
+
+    func testALaterApplyDoesNotRestartTheWait() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "first")
+        store.recordSuccessfulActivation(wallpaperID: "first", now: start)
+        store.recordDownload(wallpaperID: "second")
+        store.recordSuccessfulActivation(wallpaperID: "second", now: start + day - 60)
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, now: start + day), .support)
+    }
+
+    /// The first-run guide was the day's question: nothing follows it that day, a relaunch
+    /// included, and the next day the prompts resume in their order.
+    func testNoPromptComesOnTheDayTheFirstRunGuideEnded() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordWelcomeGuideEnded(now: start)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 60))
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 60), "a relaunch the same day")
+        XCTAssertEqual(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + day), .telemetry)
+
+        store.markPresented(.telemetry, now: start + day)
+        store.recordWelcomeGuideEnded(now: start)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start + day + 60),
+                     "an earlier end does not give back the day of a later prompt")
     }
 
     func testTelemetryPromptIsForThoseWhoFinishedTheGuideWithoutIt() {
@@ -162,12 +212,12 @@ final class SupportPromptStoreTests: XCTestCase {
     }
 
     /// The import offer is for someone signed in to Steam who finished the guide without meeting
-    /// it; the guide's card or a Steam Community sign-in spends it, and it comes after the
-    /// performance data question.
+    /// it: a Steam Community sign-in, or the card of a guide from an earlier build, spends it, and
+    /// it comes after the performance data question.
     func testSubscriptionsOfferIsForSignedInUsersWhoNeverMetTheImport() throws {
         let store = SupportPromptStore(defaults: defaults, calendar: calendar)
         XCTAssertNil(store.pendingPrompt(welcomeSeen: false, telemetryOn: true, steamSignedIn: true, now: start),
-                     "the guide offers it to new users")
+                     "not before the guide has been seen")
         XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: false, now: start),
                      "nothing to import without a Steam account")
         XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: start),
@@ -216,6 +266,167 @@ final class SupportPromptStoreTests: XCTestCase {
         XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
     }
 
+    /// The Discord invitation runs on the star's clock, later: three weeks and seven days of use.
+    /// Once shown it never returns, a relaunch included.
+    func testDiscordInvitationWaitsForThreeWeeksAndSevenDaysOfUse() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        store.recordStarChosen()
+        useOnDays(store, 6)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 40 * day),
+                     "three weeks, but six days of use")
+        store.recordPanelUse(now: start + 6 * day)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 20 * day),
+                     "seven days of use, but not three weeks yet")
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 21 * day), .discord)
+
+        store.markPresented(.discord, now: start + 21 * day)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 90 * day), "invited once, for good")
+    }
+
+    /// When everything is due at once the invitation is the last of the prompts, each on a day of
+    /// its own.
+    func testTheDiscordInvitationComesAfterEveryOtherPromptOnADayOfItsOwn() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded", now: start)
+        useOnDays(store, 8)
+        var now = start + 30 * day
+        var shown = [SupportPromptStore.Prompt]()
+        while let prompt = store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: now) {
+            shown.append(prompt)
+            store.markPresented(prompt, now: now)
+            XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, steamSignedIn: true, now: now + 60),
+                         "one prompt a day")
+            now += day
+        }
+        XCTAssertEqual(shown, [.telemetry, .subscriptions, .support, .star, .discord])
+    }
+
+    // MARK: - The battery question
+
+    /// A Mac with a battery, on battery, a wallpaper playing and both battery choices on Keep running.
+    private let unplugged = SupportPromptStore.BatteryFacts(
+        hasBattery: true, onBattery: true, wallpaperPlaying: true)
+
+    func testTheBatteryQuestionNeedsABatteryABatteryUseAWallpaperAndNothingChosen() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        func due(_ change: (inout SupportPromptStore.BatteryFacts) -> Void = { _ in },
+                 welcomeSeen: Bool = true) -> SupportPromptStore.Prompt? {
+            var facts = unplugged
+            change(&facts)
+            return store.pendingPrompt(welcomeSeen: welcomeSeen, telemetryOn: false, battery: facts, now: start)
+        }
+        XCTAssertEqual(due(), .battery)
+        XCTAssertNil(due { $0.hasBattery = false }, "a UPS or a desktop Mac is not asked")
+        XCTAssertNil(due { $0.onBattery = false }, "plugged in, and never seen on battery since launch")
+        XCTAssertNil(due { $0.wallpaperPlaying = false }, "nothing playing, nothing to save")
+        XCTAssertNil(due { $0.batteryMode = .reducedQuality }, "a battery choice was made")
+        XCTAssertNil(due { $0.batteryMode = .pause })
+        for action in [OtherAppInFrontAction.mute, .pause, .pauseOnBattery] {
+            XCTAssertNil(due { $0.otherAppInFront = action }, "\(action) already saves energy")
+        }
+        XCTAssertNil(due(welcomeSeen: false), "the guide shows the On battery choice to new users")
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start),
+                     "without the panel's facts nothing is asked")
+    }
+
+    /// A wallpaper that played on battery since launch counts once plugged in again; a relaunch
+    /// has to see it again.
+    func testABatteryUseSinceLaunchCountsUntilTheAppQuits() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        var pluggedIn = unplugged
+        pluggedIn.onBattery = false
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start))
+        store.recordBatteryUse()
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start), .battery)
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: pluggedIn, now: start),
+                     "the battery use is not saved")
+    }
+
+    /// Shown once it is spent for good; the guide's Preferences page, or a choice in Settings or
+    /// the menu bar, spends it without showing it; state saved before it existed loads it unspent.
+    func testTheBatteryQuestionIsAskedOnceForGood() throws {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        XCTAssertEqual(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start), .battery)
+        store.markPresented(.battery, now: start)
+        XCTAssertNil(store.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start + 60))
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start + 30 * day),
+                     "asked once, a relaunch included")
+
+        let elsewhere = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults, calendar: calendar)
+        elsewhere.recordTelemetryAsked()
+        elsewhere.recordBatteryAsked()
+        XCTAssertNil(elsewhere.pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start))
+
+        let key = "WallpaperMachine.supportPrompt.state"
+        let earlierDefaults = try TemporaryDefaults.make(for: self).defaults
+        let earlier = SupportPromptStore(defaults: earlierDefaults, calendar: calendar)
+        earlier.recordTelemetryAsked()
+        var saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(earlierDefaults.data(forKey: key))) as? [String: Any])
+        XCTAssertNotNil(saved.removeValue(forKey: "batteryAsked"))
+        earlierDefaults.set(try JSONSerialization.data(withJSONObject: saved), forKey: key)
+        XCTAssertEqual(SupportPromptStore(defaults: earlierDefaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, battery: unplugged, now: start), .battery,
+                       "an existing user who finished the guide earlier is asked once")
+    }
+
+    /// Right after the performance data question, before everything else, each on a day of its own.
+    func testTheBatteryQuestionComesRightAfterThePerformanceDataQuestion() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordDownload(wallpaperID: "downloaded")
+        store.recordSuccessfulActivation(wallpaperID: "downloaded", now: start)
+        useOnDays(store, 8)
+        var now = start + 30 * day
+        var shown = [SupportPromptStore.Prompt]()
+        while let prompt = store.pendingPrompt(
+            welcomeSeen: true, telemetryOn: false, steamSignedIn: true, battery: unplugged, now: now) {
+            shown.append(prompt)
+            store.markPresented(prompt, now: now)
+            XCTAssertNil(store.pendingPrompt(
+                welcomeSeen: true, telemetryOn: false, steamSignedIn: true, battery: unplugged, now: now + 60),
+                         "one prompt a day")
+            now += day
+        }
+        XCTAssertEqual(shown, [.telemetry, .battery, .subscriptions, .support, .star, .discord])
+    }
+
+    /// Someone who joined from Settings › About or the Help menu is not invited.
+    func testJoiningDiscordElsewhereSkipsTheInvitation() {
+        let store = SupportPromptStore(defaults: defaults, calendar: calendar)
+        store.recordTelemetryAsked()
+        store.recordStarChosen()
+        useOnDays(store, 8)
+        store.recordDiscordChosen()
+        XCTAssertNil(SupportPromptStore(defaults: defaults, calendar: calendar)
+            .pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day))
+    }
+
+    /// State saved by a build without the invitation reads it as not yet shown, so an existing
+    /// user who has used the app for a while is invited once after the update.
+    func testStateSavedBeforeTheDiscordInvitationLoadsWithItUnspent() throws {
+        let earlier = SupportPromptStore(defaults: defaults, calendar: calendar)
+        earlier.recordTelemetryAsked()
+        useOnDays(earlier, 8)
+        earlier.markPresented(.star, now: start + 20 * day)
+        let key = "WallpaperMachine.supportPrompt.state"
+        var saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(defaults.data(forKey: key))) as? [String: Any])
+        saved["discordChosen"] = nil
+        saved["discordPresented"] = nil
+        defaults.set(try JSONSerialization.data(withJSONObject: saved), forKey: key)
+
+        let updated = SupportPromptStore(defaults: defaults, calendar: calendar)
+        XCTAssertEqual(updated.pendingPrompt(welcomeSeen: true, telemetryOn: false, now: start + 30 * day), .discord)
+    }
+
     func testStateSavedByEarlierBuildsStillLoads() throws {
         let earlier = try JSONSerialization.data(withJSONObject: [
             "downloadedWallpaperIDs": ["a"], "pending": true, "presented": false,
@@ -223,6 +434,7 @@ final class SupportPromptStoreTests: XCTestCase {
         defaults.set(earlier, forKey: "WallpaperMachine.supportPrompt.state")
         let store = SupportPromptStore(defaults: defaults, calendar: calendar)
         XCTAssertTrue(store.isPending)
+        // Earned under a build that did not record when: it already waited, so it is due at once.
         XCTAssertEqual(store.pendingPrompt(welcomeSeen: false, telemetryOn: true, now: start), .support)
     }
 }

@@ -6,10 +6,9 @@ import SwiftUI
 /// a link at all.
 struct PropertyLabelView: View {
   let document: PropertyLabelDocument
-  /// The size body text is drawn at; headings and `<big>` scale from it.
-  var baseSize: CGFloat = 13
-  /// Draw plain runs in this weight (a group's heading is semibold).
-  var baseWeight = Font.Weight.regular
+  /// The role plain runs are drawn in (a group's heading is `.sectionHeader`); an author's headings
+  /// and `<big>` scale from its size.
+  var role: PanelFont = .body
   var color: Color?
 
   @Environment(\.panelTheme) private var theme
@@ -20,8 +19,8 @@ struct PropertyLabelView: View {
         switch block {
         case .paragraph(let paragraph):
           ParagraphView(
-            paragraph: paragraph, baseSize: baseSize, baseWeight: baseWeight,
-            color: color ?? theme.surface.text.color, accent: theme.accent.accent.color)
+            paragraph: paragraph, role: role, color: color ?? theme.surface.text.color,
+            accent: theme.accent.accent.color)
         case .image(let image):
           PropertyLabelImageView(image: image)
         case .rule:
@@ -34,20 +33,16 @@ struct PropertyLabelView: View {
 
   private struct ParagraphView: View {
     let paragraph: PropertyLabelDocument.Paragraph
-    let baseSize: CGFloat
-    let baseWeight: Font.Weight
+    let role: PanelFont
     let color: Color
     let accent: Color
 
     var body: some View {
       HStack(alignment: .firstTextBaseline, spacing: 4) {
         if let marker = paragraph.marker {
-          Text(verbatim: marker).font(.system(size: baseSize)).foregroundStyle(color)
+          Text(verbatim: marker).font(.panel(role)).foregroundStyle(color)
         }
-        Text(
-          PropertyLabelView.attributed(
-            paragraph, baseSize: baseSize, baseWeight: baseWeight, accent: accent)
-        )
+        Text(PropertyLabelView.attributed(paragraph, role: role, accent: accent))
         .foregroundStyle(color)
         .multilineTextAlignment(paragraph.isCentered ? .center : .leading)
         .frame(maxWidth: .infinity, alignment: paragraph.isCentered ? .center : .leading)
@@ -66,16 +61,16 @@ struct PropertyLabelView: View {
 
   /// The paragraph as attributed text. Colour is the author's when it is a valid spelling.
   static func attributed(
-    _ paragraph: PropertyLabelDocument.Paragraph, baseSize: CGFloat, baseWeight: Font.Weight,
-    accent: Color
+    _ paragraph: PropertyLabelDocument.Paragraph, role: PanelFont, accent: Color
   ) -> AttributedString {
     var result = AttributedString()
     let headingScale = paragraph.heading.flatMap { Self.headingScale[$0] } ?? 1
     for run in paragraph.runs {
       var piece = AttributedString(run.text)
-      let size = baseSize * min(1.8, max(0.7, run.scale * headingScale))
-      var font = Font.system(
-        size: size, weight: run.isBold || paragraph.heading != nil ? .bold : baseWeight)
+      let scaled = role.scaled(by: min(1.8, max(0.7, run.scale * headingScale)))
+      let size = scaled.size
+      var font = Font.panel(
+        run.isBold || paragraph.heading != nil ? scaled.weighted(.bold) : scaled)
       if run.isItalic { font = font.italic() }
       piece.font = font
       if run.isUnderlined { piece.underlineStyle = .single }

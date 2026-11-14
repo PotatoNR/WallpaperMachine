@@ -1,8 +1,7 @@
 import Foundation
 
 /// The card that tells a person which device to pick up and what to press when Steam asks for more
-/// than a password: an icon, a one-line title and numbered steps, shared by the download dialog and
-/// the first-run guide.
+/// than a password: an icon, a one-line title and numbered steps, in the download dialog.
 ///
 /// A plain password prompt needs no card: its labelled field says everything. Any other prompt
 /// Steam makes without naming a method gets the general one.

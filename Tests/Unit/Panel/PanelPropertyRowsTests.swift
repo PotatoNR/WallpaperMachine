@@ -13,14 +13,14 @@ final class PanelPropertyRowsTests: PanelTestCase {
   private func property(
     _ id: String, _ kind: BridgePropertyKind = .text, label: String? = nil, dirty: Bool = false,
     value: BridgePropertyValue? = nil, defaultValue: BridgePropertyValue = .empty,
-    enabled: Bool = true
+    enabled: Bool = true, staged: Bool = false
   ) -> BridgePropertyDescriptor {
     BridgePropertyDescriptor(
       id: id, kind: kind, labelHtml: label ?? id,
       value: value ?? (kind == .bool ? .bool(value: true) : .empty), defaultValue: defaultValue,
       slider: nil, comboOptions: [], fileFilter: nil, directoryMode: nil, dirty: dirty,
       canRestoreDefaults: false, enabled: enabled, assetManaged: false, assetMissing: false,
-      assetSourcePath: nil)
+      assetSourcePath: nil, staged: staged)
   }
 
   private func make(
@@ -258,8 +258,8 @@ final class PanelPropertyRowsTests: PanelTestCase {
   /// one added without its translations cannot show English unnoticed.
   func testEveryCuratedEnginePhraseIsTranslatedInEveryShippedLanguage() throws {
     XCTAssertFalse(PropertyLabels.curatedPhrases.isEmpty)
-    for tag in ["ja", "zh-Hans", "zh-Hant"] {
-      let language = try XCTUnwrap(AppLanguage.named(tag), tag)
+    for language in AppLanguage.supported where language != .english {
+      let tag = language.tag
       let locale = PanelLocale(language: language, region: nil)
       for phrase in Set(PropertyLabels.curatedPhrases.values).sorted() {
         let translated = locale.catalogString(phrase)
@@ -364,6 +364,29 @@ final class PanelPropertyRowsTests: PanelTestCase {
     XCTAssertTrue(try row("chosen", in: options).isModified)
     XCTAssertEqual(try row("chosen", in: options).control, .toggle(isOn: false))
     XCTAssertTrue(options.hasUnsentChanges)
+  }
+
+  /// A row whose value waits for Apply changes says Not applied, ahead of Modified; a value that is
+  /// saved but differs from the author's default says Modified; an untouched one says nothing.
+  func testARowWaitingForApplyIsMarkedNotAppliedAndASavedChangeModified() throws {
+    let options = make(
+      [
+        property("untouched", .bool), property("saved", .bool, dirty: true),
+        property("waiting", .bool, dirty: true, staged: true), property("restored", .bool, staged: true),
+        property("typed", .textInput, value: .string(value: "x")), property("chosen", .bool, dirty: true),
+      ]
+    ) {
+      $0.textDrafts = ["typed": "typed more"]
+      $0.pendingValues = ["chosen": .bool(value: false)]
+    }
+    XCTAssertNil(try row("untouched", in: options).mark)
+    XCTAssertEqual(try row("saved", in: options).mark, .modified, "applied, it still differs from the default")
+    XCTAssertEqual(try row("waiting", in: options).mark, .notApplied, "waiting comes before Modified")
+    let restored = try row("restored", in: options)
+    XCTAssertEqual(restored.mark, .notApplied, "staged back to its default, it still waits")
+    XCTAssertFalse(restored.isModified)
+    XCTAssertEqual(try row("typed", in: options).mark, .notApplied, "text not yet sent waits")
+    XCTAssertEqual(try row("chosen", in: options).mark, .notApplied, "a value on its way waits")
   }
 
   // MARK: Restore all and the footer

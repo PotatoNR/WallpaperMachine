@@ -32,6 +32,15 @@ struct DisplaysSettingsSection: View {
   static let wallpaper = SettingsItem(
     id: "displays.wallpaper", section: .displays, group: card, title: "Wallpaper",
     keywords: ["Choose…", "Eject", "None selected"])
+  static let desktops = SettingsItem(
+    id: "displays.desktops", section: .displays, group: card, title: "Different wallpaper for each desktop",
+    note:
+      "Each desktop keeps the wallpaper you apply while you are on it, and only the desktop you are on plays, so Mission Control shows the other desktops as still pictures. A desktop you have visited waits paused where you left it; one you have not visited yet shows a still picture until its first visit. Kept wallpapers use memory and are let go when the Mac runs short of it.",
+    keywords: [
+      "Desktop \(1)", "Keeps the current wallpaper", "Keep the current wallpaper", "Unavailable desktop",
+      "Spaces", "Refresh Spaces",
+      "Turning it on replaces this display’s automatic wallpaper selection.",
+    ])
 
   // The playlist
   static let playlist = SettingsItem(
@@ -69,11 +78,17 @@ struct DisplaysSettingsSection: View {
     id: "displays.playlist-custom", section: .displays, inside: playlist,
     title: "Minutes between changes", note: "Any whole number of minutes, up to \(10080).",
     keywords: ["min"])
+  static let playlistClipEnd = SettingsItem(
+    id: "displays.playlist-clip-end", section: .displays, inside: playlist,
+    title: "Wait for the video to finish",
+    note:
+      "A change that falls due while a video wallpaper plays waits until the video reaches its end, for up to an hour. Other wallpapers change on time.")
   static let playlistNext = SettingsItem(
     id: "displays.playlist-next", section: .displays, inside: playlist, title: "Next change",
     keywords: [
       "Change now", "Changes when you unlock the Mac, while wallpapers are playing.",
       "Around \("12:00"), if wallpapers are playing then.",
+      "When the video finishes, by \("12:00") at the latest.",
       "Starts counting once wallpapers play.",
     ])
   static let playlistList = SettingsItem(
@@ -128,7 +143,7 @@ struct DisplaysSettingsSection: View {
     id: "displays.automation-mode", section: .displays, inside: automation,
     title: "Automatic changes", note: "Manual choices stay until the next rule changes them.",
     keywords: [
-      "Off", "Time schedule", "Follow system appearance", "Follow desktop Space",
+      "Off", "Time schedule", "Follow system appearance", "Different wallpaper for each desktop",
       "Turn off animated lock-screen wallpaper to use desktop Space choices.",
       "Desktop information is unavailable. Refresh Spaces or choose another automatic mode.",
     ])
@@ -138,15 +153,6 @@ struct DisplaysSettingsSection: View {
   static let automationDark = SettingsItem(
     id: "displays.automation-dark", section: .displays, inside: automation,
     title: "In dark appearance", keywords: ["Leave as it is", "Use wallpaper", "Use saved playlist"])
-  static let automationSpaces = SettingsItem(
-    id: "displays.automation-spaces", section: .displays, inside: automation,
-    title: "Follow desktop Space",
-    note:
-      "Experimental. Switching desktops reloads their chosen wallpaper or playlist and may briefly show the previous wallpaper. Full-screen app Spaces keep the last choice.",
-    keywords: [
-      "Desktop \(1)", "Unavailable desktop",
-      "Desktop numbers follow their order on this display; choices follow the desktop when you reorder it. An empty choice keeps the current wallpaper.",
-    ])
   static let automationSchedule = SettingsItem(
     id: "displays.automation-schedule", section: .displays, inside: automation,
     title: "Add time rule",
@@ -176,7 +182,10 @@ struct DisplaysSettingsSection: View {
     id: "displays.scaling", section: .displays, inside: playback, title: "Scaling",
     keywords: ["No scaling", "Stretch", "Match", "Fill"])
   static let scaleFactor = SettingsItem(
-    id: "displays.scale-factor", section: .displays, inside: playback, title: "Scale factor")
+    id: "displays.scale-factor", section: .displays, inside: playback, title: "Scale factor",
+    note:
+      "Zooms the wallpaper after scaling: 1 keeps its size, more than 1 enlarges it and crops what no longer fits, less than 1 shrinks it."
+  )
   static let frameRate = SettingsItem(
     id: "displays.frame-rate", section: .displays, inside: playback, title: "Frame rate",
     keywords: [
@@ -216,21 +225,29 @@ struct DisplaysSettingsSection: View {
     ])
   static let solarLongitude = SettingsItem(
     id: "displays.solar-longitude", section: .displays, group: solar, title: "Longitude")
+  static let solarSource = SettingsItem(
+    id: "displays.solar-source", section: .displays, group: solar, title: "Time source",
+    keywords: ["Coordinates", "Fixed times", "Automatic"])
+  static let solarSunrise = SettingsItem(
+    id: "displays.solar-sunrise", section: .displays, group: solar, title: "Sunrise time")
+  static let solarSunset = SettingsItem(
+    id: "displays.solar-sunset", section: .displays, group: solar, title: "Sunset time")
   static let solarActions = SettingsItem(
     id: "displays.solar-actions", section: .displays, group: solar, title: "Save location",
-    keywords: ["Clear location"])
+    keywords: ["Clear location", "Use current location"])
 
   /// The page's order.
   static let items: [SettingsItem] = [
-    refresh, enable, mode, mirrorSource, wallpaper,
+    refresh, enable, mode, mirrorSource, wallpaper, desktops,
     playlist, playlistMode, playlistHeld, playlistSource, playlistOrder, playlistInterval,
-    playlistCustom, playlistNext, playlistList, playlistSkipped, playlistDay, playlistDayStart,
+    playlistCustom, playlistClipEnd, playlistNext, playlistList, playlistSkipped, playlistDay, playlistDayStart,
     playlistNight, playlistNightStart, playlistSwitch, playlistPlan,
     transfer, transferPeer,
-    automation, automationMode, automationLight, automationDark, automationSpaces,
+    automation, automationMode, automationLight, automationDark,
     automationSchedule, automationFooter,
     playback, scaling, scaleFactor, frameRate, mute, volume,
-    layoutsSave, plansList, solarIntro, solarLongitude, solarActions,
+    layoutsSave, plansList, solarIntro, solarSource, solarSunrise, solarSunset,
+    solarLongitude, solarActions,
   ]
 
   @Environment(PanelController.self) private var controller

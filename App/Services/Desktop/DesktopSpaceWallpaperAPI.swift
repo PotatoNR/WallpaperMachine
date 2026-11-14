@@ -17,6 +17,8 @@ struct DesktopPictureTarget: Hashable, Codable {
 /// https://gist.github.com/RhetTbull/86394ac9c2cc1096e510775dee14ae08
 /// These optional HIServices/CoreGraphics APIs target an inactive Space directly.
 /// Do not replace them with Space switching, plist edits, or process restarts.
+/// Only a full restoration edits the store, for choices these APIs cannot write
+/// back (`DesktopWallpaperStoreRestoration`).
 @MainActor
 final class DesktopSpaceWallpaperAPI {
     private typealias Connection = @convention(c) () -> Int32
@@ -57,9 +59,10 @@ final class DesktopSpaceWallpaperAPI {
                 identifier == "Main" || $0.value.caseInsensitiveCompare(identifier) == .orderedSame
             }.keys.sorted()
             for space in spaces {
-                // Fullscreen app Spaces are not desktop thumbnails.
+                // macOS names the primary desktop with an empty UUID string, including in the
+                // system wallpaper store (`Spaces[""]`) and `DesktopPictureCopyDisplayForSpace`.
                 guard (space["type"] as? NSNumber)?.intValue == 0,
-                      let uuid = space["uuid"] as? String, !uuid.isEmpty else { continue }
+                      let uuid = space["uuid"] as? String else { continue }
                 for display in matching {
                     let target = DesktopPictureTarget(display: display, space: uuid)
                     if !result.contains(target) { result.append(target) }
@@ -91,18 +94,35 @@ final class DesktopSpaceWallpaperAPI {
                               allowClipping: false, fill: [0, 0, 0, 1], nativeOptions: data)
     }
 
-    func set(_ picture: DesktopPicture, target: DesktopPictureTarget) throws {
+    func set(_ picture: DesktopPicture, target: DesktopPictureTarget) async throws {
+        try Task.checkCancellation()
         guard let display = UInt32(target.display), let space = target.space else { return }
         let config = try Self.configuration(picture)
         setPicture(display, config as CFDictionary, 0, 0, space as CFString)
-        // The setter returns void, and on macOS 27 WallpaperAgent applies the
-        // write asynchronously: the readback trails an accepted write by about
-        // 0.3 s. A write not visible yet is unconfirmed, not refused; the
-        // ledger checks it again and only then counts a refusal.
         guard let actual = copyPicture(display, 0, space as CFString)?.takeRetainedValue() as? [String: Any],
               Self.acknowledges(actual, expected: config) else {
             throw DesktopPictureUnconfirmed()
         }
+    }
+
+    func confirms(_ picture: DesktopPicture, target: DesktopPictureTarget) throws -> Bool {
+        guard let display = UInt32(target.display), let space = target.space,
+              let actual = copyPicture(display, 0, space as CFString)?.takeRetainedValue() as? [String: Any] else {
+            return false
+        }
+        return Self.acknowledges(actual, expected: try Self.configuration(picture))
+    }
+
+    static func confirm(attempts: Int = 21,
+                        wait: @escaping @MainActor () async -> Void = {
+                            await Task { try? await Task.sleep(for: .milliseconds(50)) }.value
+                        },
+                        readback: @MainActor () throws -> Bool) async throws {
+        for attempt in 0..<attempts {
+            if try readback() { return }
+            if attempt + 1 < attempts { await wait() }
+        }
+        throw DesktopPictureUnconfirmed()
     }
 
     static func acknowledges(_ actual: [String: Any], expected: [String: Any]) -> Bool {
@@ -164,22 +184,40 @@ final class DesktopSpaceWallpaperAPI {
 @MainActor
 final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
     private let spaces = DesktopSpaceWallpaperAPI()
-    private let storeURL: URL
+    private let store: SystemWallpaperStore
+    var coordinator: SystemWallpaperStore? { store }
+    private var pendingPictures: [DesktopPictureTarget: DesktopPicture] = [:]
     private var reportedFallback = false
 
-    init(storeURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-        "Library/Application Support/com.apple.wallpaper/Store/Index.plist")) {
-        self.storeURL = storeURL
+    init(coordinator: SystemWallpaperStore? = nil) {
+        store = coordinator ?? .shared
+    }
+
+    func storeContents() throws -> Data? {
+        do { return try store.read() }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return nil
+        }
+    }
+
+    func replaceStore(_ data: Data, expected: Data) throws {
+        try store.replace(data, expected: expected)
+    }
+
+    /// WallpaperAgent reads the store only as it starts, so it is restarted to
+    /// show the replaced selections.
+    func reloadStore() async throws {
+        try await store.reload()
     }
 
     func referencedPictureURLs(targets: [DesktopPictureTarget]) throws -> Set<URL> {
-        guard !targets.isEmpty, FileManager.default.fileExists(atPath: storeURL.path) else { return [] }
+        guard !targets.isEmpty, let contents = try storeContents() else { return [] }
         let displays = Set(targets.compactMap { target -> String? in
             guard let id = UInt32(target.display),
                   let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
             return CFUUIDCreateString(nil, uuid) as String
         })
-        return try Self.referencedPictureURLs(in: Data(contentsOf: storeURL), displays: displays,
+        return try Self.referencedPictureURLs(in: contents, displays: displays,
                                              spaces: Set(targets.compactMap(\.space)))
     }
 
@@ -227,7 +265,7 @@ final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
     }
 
     static func id(_ screen: NSScreen) -> String? {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue
+        SystemDisplays.id(of: screen).map { String($0) }
     }
 
     func targets() throws -> [DesktopPictureTarget] {
@@ -252,23 +290,52 @@ final class SystemDesktopPictureWorkspace: DesktopPictureWorkspace {
     private func screen(_ display: String) -> NSScreen? { NSScreen.screens.first { Self.id($0) == display } }
 
     func currentPicture(target: DesktopPictureTarget) throws -> DesktopPicture? {
-        if target.space != nil { return try spaces?.picture(target: target) }
-        guard let screen = screen(target.display), let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
+        if target.space != nil {
+            return try spaces?.picture(target: target)
+        }
+        guard let screen = screen(target.display),
+              let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
         let options = NSWorkspace.shared.desktopImageOptions(for: screen) ?? [:]
-        let color = (options[.fillColor] as? NSColor)?.usingColorSpace(.sRGB)
-            ?? NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
-        return DesktopPicture(url: url,
-                              scaling: (options[.imageScaling] as? NSNumber)?.intValue ?? Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                              allowClipping: (options[.allowClipping] as? NSNumber)?.boolValue ?? true,
-                              fill: [color.redComponent, color.greenComponent, color.blueComponent, color.alphaComponent])
+        let scaling = (options[.imageScaling] as? NSNumber)?.intValue
+            ?? Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue)
+        let clipping = (options[.allowClipping] as? NSNumber)?.boolValue ?? true
+        var fill: [Double] = [0, 0, 0, 1]
+        if let color = (options[.fillColor] as? NSColor)?.usingColorSpace(.sRGB) {
+            fill = [Double(color.redComponent), Double(color.greenComponent),
+                    Double(color.blueComponent), Double(color.alphaComponent)]
+        }
+        return DesktopPicture(url: url, scaling: scaling, allowClipping: clipping, fill: fill)
     }
 
-    func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) throws {
+    func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) async throws {
+        try Task.checkCancellation()
         if target.space != nil {
             guard let spaces else { throw CocoaError(.featureUnsupported) }
-            try spaces.set(picture, target: target)
+            pendingPictures[target] = picture
+            try await spaces.set(picture, target: target)
         } else if let screen = screen(target.display) {
             try NSWorkspace.shared.setDesktopImageURL(picture.url, for: screen, options: picture.options)
+            pendingPictures[target] = picture
         }
+    }
+
+    func finishPictureWrites() async throws {
+        guard !pendingPictures.isEmpty else { return }
+        let pending = pendingPictures
+        defer { pendingPictures.removeAll() }
+        do {
+            try await DesktopSpaceWallpaperAPI.confirm {
+                try pending.allSatisfy { target, picture in
+                    if target.space != nil {
+                        return try self.spaces?.confirms(picture, target: target) == true
+                    }
+                    return try self.currentPicture(target: target)?.url.standardizedFileURL == picture.url.standardizedFileURL
+                }
+            }
+        } catch {
+            try await Task { try await self.store.reload() }.value
+            throw error
+        }
+        try Task.checkCancellation()
     }
 }

@@ -11,13 +11,15 @@ struct DesktopPicture: Equatable, Codable {
     var nativeOptions: Data? = nil
 
     static func poster(_ url: URL) -> Self {
+        // The poster already has the display's aspect ratio: fill the screen without scaling twice.
         Self(url: url, scaling: Int(NSImageScaling.scaleAxesIndependently.rawValue),
              allowClipping: false, fill: [0, 0, 0, 1])
     }
 
     var options: [NSWorkspace.DesktopImageOptionKey: Any] {
         var result: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: scaling, .allowClipping: allowClipping
+            .imageScaling: NSNumber(value: scaling),
+            .allowClipping: NSNumber(value: allowClipping),
         ]
         if fill.count == 4 {
             result[.fillColor] = NSColor(srgbRed: fill[0], green: fill[1], blue: fill[2], alpha: fill[3])
@@ -33,18 +35,36 @@ struct DesktopPictureUnconfirmed: Error {}
 /// Tests use an in-memory workspace; no test changes the user's wallpaper.
 @MainActor
 protocol DesktopPictureWorkspace {
+    var coordinator: SystemWallpaperStore? { get }
     func targets() throws -> [DesktopPictureTarget]
     func currentPicture(target: DesktopPictureTarget) throws -> DesktopPicture?
-    func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) throws
+    func setPicture(_ picture: DesktopPicture, target: DesktopPictureTarget) async throws
+    func finishPictureWrites() async throws
     /// Selections waiting for WallpaperAgent to reload may not be visible
     /// through the legacy picture API yet.
     func referencedPictureURLs(targets: [DesktopPictureTarget]) throws -> Set<URL>
+    /// The macOS wallpaper store, or nil where there is none to put back.
+    func storeContents() throws -> Data?
+    /// Replaces the store if it still holds `expected`.
+    func replaceStore(_ data: Data, expected: Data) throws
+    /// Has WallpaperAgent load the store, which it reads only as it starts.
+    func reloadStore() async throws
+}
+
+extension DesktopPictureWorkspace {
+    var coordinator: SystemWallpaperStore? { nil }
+    func finishPictureWrites() async throws {}
+    func storeContents() throws -> Data? { nil }
+    func replaceStore(_ data: Data, expected: Data) throws {}
+    func reloadStore() async throws {}
 }
 
 @MainActor
 final class DesktopWallpaperLedger {
     enum Failure: LocalizedError {
         case originalUnavailable
+        /// Our native extension still owns a desktop; its stand-in is not an original.
+        case nativeProviderPending
         /// macOS still names a poster in its wallpaper store.
         case restorationPending
         /// A desktop's restored wallpaper does not read back yet.
@@ -54,7 +74,7 @@ final class DesktopWallpaperLedger {
             switch self {
             case .originalUnavailable:
                 String(localized: "The original macOS wallpaper could not be recovered. Select your wallpaper again in System Settings.")
-            case .restorationPending, .restorationUnconfirmed:
+            case .nativeProviderPending, .restorationPending, .restorationUnconfirmed:
                 String(localized: "macOS is still restoring the desktop wallpaper. Please try quitting again.")
             }
         }
@@ -96,6 +116,27 @@ final class DesktopWallpaperLedger {
     var awaitsConfirmation: Bool { !unconfirmed.isEmpty || !inFlight.isEmpty }
 
     private static let journalName = "originals.json"
+    private static let storeSnapshotName = "store-original.json"
+
+    /// The wallpaper store as it was before the first poster, and every picture
+    /// written back through the per-Space API since. That API cannot express an
+    /// aerial or extension choice; see `DesktopWallpaperStoreRestoration`.
+    private struct StoreSnapshot: Codable {
+        var store: Data
+        var written: [DesktopWallpaperStoreRestoration.Write] = []
+        /// The store was put back but WallpaperAgent has not loaded it yet.
+        var reloadPending: Bool? = nil
+    }
+    private var storeSnapshot: StoreSnapshot?
+    private let storeSnapshotURL: URL
+    private var checkedOriginalStore = false
+
+    /// Share a read across this pass's new originals, without caching it across
+    /// later handovers or external changes. Ordinary poster updates need no read.
+    private enum OriginalStore {
+        case unread
+        case read(Data?)
+    }
 
     /// What macOS shows a new user, through a link to the current release's
     /// picture. It is put back on a desktop whose original no longer exists
@@ -120,22 +161,33 @@ final class DesktopWallpaperLedger {
          confirmationWindow: Duration = DesktopWallpaperLedger.confirmationWindow,
          systemDefaultPicture: URL = DesktopWallpaperLedger.systemDefaultPictureURL) throws {
         self.folder = folder
-        self.journal = folder.appendingPathComponent(Self.journalName)
         self.workspace = workspace
         self.confirmationWindow = confirmationWindow
         self.systemDefaultPicture = systemDefaultPicture
+        journal = folder.appendingPathComponent(Self.journalName)
+        storeSnapshotURL = folder.appendingPathComponent(Self.storeSnapshotName)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: journal.path) {
+            // A journal that cannot be read must stop creation: writing posters without a way
+            // back to the originals would strand the user's wallpaper.
             entries = try JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: journal))
         } else {
             entries = [:]
         }
+        if FileManager.default.fileExists(atPath: storeSnapshotURL.path) {
+            storeSnapshot = try JSONDecoder().decode(StoreSnapshot.self, from: Data(contentsOf: storeSnapshotURL))
+        }
     }
 
     /// Whether the journal in `folder` still names a poster whose original has not been put back,
-    /// so a crash, a relaunch or a switched-off preference may have left one on a desktop. False
-    /// for a missing, unreadable or empty journal. Reads the file only; nothing is created.
+    /// so a crash, a relaunch or a switched-off preference may have left one on a desktop, or the
+    /// store copy is still there: its selections, or WallpaperAgent's reload of them, may not be
+    /// back yet. False for a missing, unreadable or empty journal and no store copy. Reads the
+    /// files only; nothing is created.
     static func hasRecordedOriginals(in folder: URL) -> Bool {
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent(storeSnapshotName).path) {
+            return true
+        }
         guard let data = try? Data(contentsOf: folder.appendingPathComponent(journalName)),
               let entries = try? JSONDecoder().decode([String: Entry].self, from: data) else { return false }
         return !entries.isEmpty
@@ -143,8 +195,47 @@ final class DesktopWallpaperLedger {
 
     /// Submit a fresh frame to EVERY desktop on its display, without a Space
     /// change event. A loading renderer keeps the previous poster until ready.
-    func synchronize(posters: [String: Data], liveDisplays: Set<String>, targetSpaces: [String: Set<String>] = [:]) throws {
+    ///
+    /// `spacePosters` gives a display's desktops a picture of their own: a display that follows
+    /// desktop Spaces sends the last poster of each desktop's wallpaper. A desktop outside
+    /// `targetSpaces` takes only that; one inside it takes the fresh poster when there is one.
+    func synchronize(posters: [String: Data], liveDisplays: Set<String>, targetSpaces: [String: Set<String>] = [:],
+                     spacePosters: [String: [String: Data]] = [:]) async throws {
+        try await transaction {
+            try await self.synchronizeUncoordinated(posters: posters, liveDisplays: liveDisplays,
+                                                  targetSpaces: targetSpaces, spacePosters: spacePosters)
+        }
+    }
+
+    private func transaction(_ operation: @escaping @MainActor () async throws -> Void) async throws {
+        let drainedOperation = {
+            self.checkedOriginalStore = false
+            do {
+                try await operation()
+            } catch {
+                try await self.workspace.finishPictureWrites()
+                throw error
+            }
+            try await self.workspace.finishPictureWrites()
+        }
+        if let coordinator = workspace.coordinator {
+            try await coordinator.transaction(drainedOperation)
+        } else {
+            try await drainedOperation()
+        }
+    }
+
+    private func synchronizeUncoordinated(posters: [String: Data], liveDisplays: Set<String>,
+                                         targetSpaces: [String: Set<String>] = [:],
+                                         spacePosters: [String: [String: Data]] = [:], prune: Bool = true) async throws {
+        try Task.checkCancellation()
         let targets = try workspace.targets()
+        var originalStore = OriginalStore.unread
+        if !checkedOriginalStore {
+            // A restarted sync can arrive before its first frame. Do not prune
+            // the old poster journal while the native provider still holds it.
+            _ = try readOriginalStore(&originalStore)
+        }
         var firstError: Error?
         // Cache only within this pass: external edits/missing files must still
         // be detected on the next refresh. Retain no extra image buffers.
@@ -155,29 +246,54 @@ final class DesktopWallpaperLedger {
         let digests = posters.mapValues { Data(SHA256.hash(data: $0)) }
         var applied = Set<DesktopPictureTarget>(), restoring = Set<DesktopPictureTarget>()
         for target in targets {
+            try Task.checkCancellation()
             // A key with an empty set holds every Space on that display. The public
             // fallback has no identity and cannot safely accept a Space-specific poster.
-            if let allowed = targetSpaces[target.display], target.space.map(allowed.contains) != true { continue }
+            let desktopID = target.space.map(WallpaperSpaceMonitor.desktopID(for:))
+            let otherDesktop = targetSpaces[target.display].map { allowed in desktopID.map(allowed.contains) != true } ?? false
+            // Only a display whose posters are scoped to its desktops takes saved ones.
+            let ownPoster = targetSpaces[target.display] == nil ? nil
+                : desktopID.flatMap { spacePosters[target.display]?[$0] }
+            if otherDesktop, ownPoster == nil { continue }
+            let fresh = otherDesktop ? nil : posters[target.display]
             do {
-                if let image = posters[target.display], liveDisplays.contains(target.display) {
+                if let image = fresh ?? ownPoster, liveDisplays.contains(target.display) {
                     applied.insert(target)
-                    try apply(image: image, digest: digests[target.display]!, target: target,
-                              comparisons: &comparisons, fallbacks: fallbacks)
+                    let digest = fresh != nil ? digests[target.display]! : Data(SHA256.hash(data: image))
+                    try await apply(image: image, digest: digest, target: target,
+                              comparisons: &comparisons, fallbacks: fallbacks, originalStore: &originalStore)
                 } else if !liveDisplays.contains(target.display) {
-                    try restore(target: target) {
+                    try await restore(target: target) {
                         if let restorable { return restorable }
                         let found = userWallpapers(targets: targets, existing: true)
                         restorable = found
                         return found
                     }
                 }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch Failure.nativeProviderPending {
+                // Its journal may still be referenced by the native recovery
+                // journal even though the picture API only returns a stand-in.
+                throw Failure.nativeProviderPending
             } catch is DesktopPictureUnconfirmed {
                 // `apply` handles its own unconfirmed writes, so this is a
                 // restoration; the next pass reads it back.
                 restoring.insert(target)
             } catch { if firstError == nil { firstError = error } }
         }
-        unconfirmedRestorations = restoring
+        try await workspace.finishPictureWrites()
+        for (target, pending) in unconfirmed {
+            if try workspace.currentPicture(target: target)?.url.standardizedFileURL == pending.url.standardizedFileURL {
+                unconfirmed[target] = nil
+                inFlight[pending.url] = nil
+                refusals[target] = nil
+            }
+        }
+        unconfirmedRestorations = restoring.filter { target in
+            guard let current = try? workspace.currentPicture(target: target) else { return true }
+            return Self.isPoster(current.url, folder: folder)
+        }
         // A desktop no longer receiving posters has nothing left to confirm;
         // its in-flight file stays until the window passes.
         unconfirmed = unconfirmed.filter { applied.contains($0.key) }
@@ -187,7 +303,11 @@ final class DesktopWallpaperLedger {
         // refresh would let posters pile up without bound. A desktop that
         // failed keeps what it shows: a readable picture is never deleted, and
         // an unreadable one leaves its display on the bounded retention.
-        do { try removeUnreferencedPosters(targets: targets) } catch {
+        do {
+            if prune, storeSnapshot?.reloadPending != true {
+                try removeUnreferencedPosters(targets: targets)
+            }
+        } catch {
             if firstError == nil { firstError = error }
         }
         // Keep updating sibling Spaces/displays even when one native call fails.
@@ -199,28 +319,72 @@ final class DesktopWallpaperLedger {
         refusals.removeAll()
     }
 
-    func restoreAll() throws {
-        try synchronize(posters: [:], liveDisplays: [])
+    func restoreAll() async throws {
+        try await transaction { try await self.restoreAllUncoordinated() }
+    }
+
+    private func restoreAllUncoordinated() async throws {
+        try await synchronizeUncoordinated(posters: [:], liveDisplays: [], prune: false)
         // Until a restoration reads back, its desktop may still show a poster,
         // and a store without one does not prove otherwise. A poster write still
         // in flight can also land after its desktop was restored; the next pass
         // restores it, and the window ends well within quit's wait.
         guard unconfirmedRestorations.isEmpty, inFlight.isEmpty else { throw Failure.restorationUnconfirmed }
+        let storeRestored = try await restoreStore()
         let targets = try workspace.targets()
         guard try !workspace.referencedPictureURLs(targets: targets)
             .contains(where: { Self.isPoster($0, folder: folder) }) else {
             throw Failure.restorationPending
         }
+        // A store that could not be read keeps its copy for the next restoration.
+        if storeRestored, storeSnapshot != nil {
+            try FileManager.default.removeItem(at: storeSnapshotURL)
+            storeSnapshot = nil
+        }
+        if storeRestored {
+            try removeUnreferencedPosters(targets: targets)
+            checkedOriginalStore = false
+        }
     }
 
-    func apply(image: Data, target: DesktopPictureTarget) throws {
+    /// Once every desktop reads back without a poster, puts back the store
+    /// selections the app replaced, including the aerial or extension choice
+    /// the per-Space API could only write back as a still picture.
+    /// A store written back but not yet loaded stays pending, so a retry or the
+    /// next launch reloads it once rather than finding nothing left to change.
+    /// False when there is a copy to put back but no store to read.
+    private func restoreStore() async throws -> Bool {
+        guard var snapshot = storeSnapshot else { return true }
+        guard let current = try workspace.storeContents() else { return false }
+        if let restored = try DesktopWallpaperStoreRestoration.restored(
+            current: current, original: snapshot.store, written: snapshot.written, posters: folder) {
+            snapshot.reloadPending = true
+            try save(snapshot)
+            try workspace.replaceStore(restored, expected: current)
+        }
+        guard snapshot.reloadPending == true else { return true }
+        try await workspace.reloadStore()
+        snapshot.reloadPending = nil
+        try save(snapshot)
+        return true
+    }
+
+    func apply(image: Data, target: DesktopPictureTarget) async throws {
+        try await transaction { try await self.applyUncoordinated(image: image, target: target) }
+    }
+
+    private func applyUncoordinated(image: Data, target: DesktopPictureTarget) async throws {
+        try Task.checkCancellation()
         var comparisons: [URL: Bool] = [:]
-        try apply(image: image, digest: Data(SHA256.hash(data: image)), target: target,
-                  comparisons: &comparisons, fallbacks: userWallpapers(targets: [target]))
+        var originalStore = OriginalStore.unread
+        try await apply(image: image, digest: Data(SHA256.hash(data: image)), target: target,
+                  comparisons: &comparisons, fallbacks: userWallpapers(targets: [target]), originalStore: &originalStore)
     }
 
     private func apply(image: Data, digest: Data, target: DesktopPictureTarget,
-                       comparisons: inout [URL: Bool], fallbacks: [String: DesktopPicture]) throws {
+                       comparisons: inout [URL: Bool], fallbacks: [String: DesktopPicture],
+                       originalStore: inout OriginalStore) async throws {
+        try Task.checkCancellation()
         guard refusals[target, default: 0] < Self.refusalsBeforePause else { return }
         guard let current = try workspace.currentPicture(target: target) else {
             throw NSError(domain: "DesktopWallpaperSync", code: 2, userInfo: [
@@ -265,6 +429,12 @@ final class DesktopWallpaperLedger {
             refusals[target] = nil
             return
         }
+        let store: Data?
+        if !checkedOriginalStore || owned == nil || storeSnapshot == nil {
+            store = try readOriginalStore(&originalStore)
+        } else {
+            store = nil
+        }
         // Never reuse a filename for different pixels: WallpaperAgent can cache
         // inactive-Space thumbnails by URL even after the file is overwritten.
         // Identical originals/frames may share an immutable file safely.
@@ -284,6 +454,12 @@ final class DesktopWallpaperLedger {
         if !FileManager.default.fileExists(atPath: url.path) {
             try image.write(to: url, options: .atomic)
         }
+        // The store as the user left it, before the first poster since the last full
+        // restoration. A poster file journaled in an earlier run is written again under
+        // its old name, so this cannot wait for a new journal entry.
+        if storeSnapshot == nil, let store {
+            try save(StoreSnapshot(store: store))
+        }
         if entries[name] == nil {
             entries[name] = Entry(original: original, display: target.display)
             // Journal BEFORE the native call, including crash/relaunch recovery.
@@ -296,8 +472,10 @@ final class DesktopWallpaperLedger {
         }
         comparisons[url] = true
         do {
-            try workspace.setPicture(.poster(url), target: target)
+            try await workspace.setPicture(.poster(url), target: target)
             refusals[target] = nil
+        } catch is CancellationError {
+            throw CancellationError()
         } catch is DesktopPictureUnconfirmed {
             let now = ContinuousClock.now
             unconfirmed[target] = (url, now)
@@ -306,6 +484,17 @@ final class DesktopWallpaperLedger {
             countRefusal(target)
             throw error
         }
+    }
+
+    private func readOriginalStore(_ originalStore: inout OriginalStore) throws -> Data? {
+        if case .read(let data) = originalStore { return data }
+        let data = try workspace.storeContents()
+        if let data, try DesktopWallpaperStoreRestoration.containsNativeDesktop(in: data) {
+            throw Failure.nativeProviderPending
+        }
+        originalStore = .read(data)
+        checkedOriginalStore = true
+        return data
     }
 
     private func countRefusal(_ target: DesktopPictureTarget) {
@@ -324,14 +513,16 @@ final class DesktopWallpaperLedger {
     /// does not exist, so writing such an original would fail on every attempt
     /// and refuse every quit. It gives way to the display's fallback and, when
     /// no original is left at all, to macOS's default picture.
-    private func restore(target: DesktopPictureTarget, fallbacks: () -> [String: DesktopPicture]) throws {
+    private func restore(target: DesktopPictureTarget, fallbacks: () -> [String: DesktopPicture]) async throws {
+        try Task.checkCancellation()
         guard let current = try workspace.currentPicture(target: target),
               Self.isPoster(current.url, folder: folder) else { return }
         // A poster whose journal entry is gone is still ours, never the user's.
         let journaled = entry(for: current.url)?.original
         let named = journaled.flatMap { Self.isUserWallpaper($0, folder: folder) ? $0 : nil }
         if let named, Self.fileMayExist(named.url) {
-            try workspace.setPicture(named, target: target)
+            try recordWritten(named.url)
+            try await workspace.setPicture(named, target: target)
             return
         }
         let original: DesktopPicture
@@ -347,7 +538,8 @@ final class DesktopWallpaperLedger {
             reportedStandIns[target] = original.url
             AppLog.warn("Desktop picture: the original of display \(target.display), desktop \(target.space ?? "current") no longer exists (\(named.url.path)); putting back \(standIn) \(original.url.path) instead")
         }
-        try workspace.setPicture(original, target: target)
+        try recordWritten(original.url)
+        try await workspace.setPicture(original, target: target)
     }
 
     /// macOS's default picture, as the file its link points to: a write is
@@ -497,4 +689,23 @@ final class DesktopWallpaperLedger {
     }
 
     private func save() throws { try JSONEncoder().encode(entries).write(to: journal, options: .atomic) }
+
+    private func save(_ snapshot: StoreSnapshot) throws {
+        try JSONEncoder().encode(snapshot).write(to: storeSnapshotURL, options: .atomic)
+        storeSnapshot = snapshot
+    }
+
+    /// A picture written back is told apart from the same picture chosen in
+    /// System Settings by this record of the write and its time, journaled
+    /// before the write. A write of the same file moments after the last one
+    /// is covered by that record.
+    private func recordWritten(_ url: URL) throws {
+        guard var snapshot = storeSnapshot else { return }
+        let now = Date()
+        if snapshot.written.contains(where: {
+            $0.url == url && now.timeIntervalSince($0.at) < DesktopWallpaperStoreRestoration.writeTolerance.before
+        }) { return }
+        snapshot.written.append(.init(url: url, at: now))
+        try save(snapshot)
+    }
 }

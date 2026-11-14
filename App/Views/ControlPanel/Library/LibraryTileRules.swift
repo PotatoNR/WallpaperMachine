@@ -49,15 +49,18 @@ struct LibraryTileMarks: Equatable {
 
   var isEmpty: Bool { !isApproved && !isFavorite && !hasUpdate }
 
+  /// The marks in the order they stack; the heart is the tile's own control, not a chip.
+  var marks: [TileMark] {
+    var marks: [TileMark] = []
+    if isApproved { marks.append(.approved) }
+    if isFavorite { marks.append(.favorite) }
+    if hasUpdate { marks.append(.update) }
+    return marks
+  }
+
   /// What VoiceOver reads after the title and the type, in the order the marks stack.
   @MainActor
-  var names: [String] {
-    var names: [String] = []
-    if isApproved { names.append(L("Approved by Wallpaper Engine")) }
-    if isFavorite { names.append(L("Favorite")) }
-    if hasUpdate { names.append(L("Update available")) }
-    return names
-  }
+  var names: [String] { marks.map(\.label) }
 }
 
 /// Which of an Installed tile's own controls show, where its Active pill sits and how the tile is
@@ -66,6 +69,10 @@ struct LibraryTileChrome: Equatable {
   /// The room the check takes at the leading corner, gap included, which the pill moves past while
   /// the check shows; the heart takes as much at the trailing corner.
   static var controlRoom: CGFloat { LibraryGridGeometry.controlSize + 4 }
+
+  /// The tick of a ticked tile, on the accent disc. No `TileMark` draws it, so a wallpaper that is
+  /// in the library is never taken for a ticked one.
+  static let checkSymbol = "checkmark"
 
   /// The check: on a ticked tile, on the one the pointer or the keyboard is on, on the one whose
   /// hold is arming, and on every tile while tiles are being ticked (selection mode, or anything

@@ -4,7 +4,8 @@ import XCTest
 @testable import WallpaperMachine
 
 /// The pure rules of the first-run guide: the drafts and their commit order, the layout of the
-/// card, the radio group's keys. No window, no stores.
+/// card, the radio group's keys, the order of the steps and the Start page's recap. No window, no
+/// stores.
 final class FirstRunDraftTests: XCTestCase {
   // MARK: DraftList
 
@@ -121,11 +122,43 @@ final class FirstRunDraftTests: XCTestCase {
 
   // MARK: Steps
 
+  /// Five pages: the guide asks for no Steam account, so Steam is not one of them.
   func testTheStepsRunInOrderFromLanguageToStart() {
-    XCTAssertEqual(WelcomeStep.allCases, [.language, .steam, .performance, .preferences, .tips, .start])
+    XCTAssertEqual(WelcomeStep.allCases, [.language, .performance, .preferences, .tips, .start])
     XCTAssertNil(WelcomeStep.language.previous)
     XCTAssertNil(WelcomeStep.start.next)
-    XCTAssertEqual(WelcomeStep.steam.next, .performance)
+    XCTAssertEqual(WelcomeStep.language.next, .performance)
     XCTAssertTrue(WelcomeStep.language.isFirst && WelcomeStep.start.isLast)
+  }
+
+  // MARK: Recap
+
+  /// The Steam row names the account signed in for downloads (SteamCMD or QR), or says the first
+  /// download asks for one.
+  @MainActor
+  func testTheRecapSaysWhoIsSignedInOrThatTheFirstDownloadAsks() {
+    func steam(_ account: String?) -> String {
+      WelcomeRecap.make(
+        languageName: nil, appearance: .system, signedInAccount: account, unsavedPerformance: 0,
+        unsavedPreferences: 0
+      ).steam
+    }
+    XCTAssertEqual(steam(nil), L("Not signed in. You’ll be asked at your first download."))
+    XCTAssertEqual(steam(""), steam(nil), "An empty name is no account")
+    XCTAssertTrue(steam("olduser").contains("olduser"))
+    XCTAssertNotEqual(steam("olduser"), steam(nil))
+  }
+
+  @MainActor
+  func testTheRecapListsOnlyPagesWithUnsavedDrafts() {
+    func recap(_ performance: Int, _ preferences: Int) -> WelcomeRecap {
+      WelcomeRecap.make(
+        languageName: "English", appearance: .dark, signedInAccount: nil,
+        unsavedPerformance: performance, unsavedPreferences: preferences)
+    }
+    XCTAssertTrue(recap(0, 0).unsaved.isEmpty)
+    XCTAssertEqual(recap(2, 0).unsaved.map(\.step), [.performance])
+    XCTAssertEqual(recap(0, 1).unsaved.map(\.step), [.preferences])
+    XCTAssertEqual(recap(1, 3).unsaved.map(\.count), [1, 3])
   }
 }

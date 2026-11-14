@@ -5,9 +5,8 @@ import Observation
 /// the downloads under way, and the pixiv account the user signed in to, if any.
 ///
 /// pixiv answers a listing (a ranking, or a search with its server-side filters); the age
-/// rating and, for rankings, orientation and size are applied here to the works it returned.
-/// Pages are cached per listing, so paging back, and changing a filter pixiv never sees, cost
-/// no request at all.
+/// rating and, for rankings, orientation and size are applied before dividing matches into pages.
+/// Source pages are cached per listing and reused when app-side filters change.
 ///
 /// Signing in happens on pixiv's own page, which hands over the session it sets; the session
 /// is checked with pixiv, kept in the keychain and sent with every request to pixiv's site.
@@ -21,11 +20,12 @@ final class PixivStore {
     private(set) var committedQuery: PixivQuery?
     /// The works on the page on show that the committed query admits, in pixiv's order.
     private(set) var works: [PixivWork] = []
-    /// Works pixiv returned for this page that the committed query's filters hide.
+    /// Unique works hidden across the source pages scanned for the committed query.
     private(set) var hiddenCount = 0
     private(set) var page = 1
     private(set) var totalPages = 1
     private(set) var totalCount = 0
+    private(set) var hasExactTotal = false
     private(set) var isLoading = false
     private(set) var hasLoaded = false
     private(set) var errorMessage: String?
@@ -43,9 +43,9 @@ final class PixivStore {
     private(set) var accountMessage: String?
     /// The signed-in `PHPSESSID`. Never logged, and sent to `www.pixiv.net` only.
     private var session: String?
-    /// Fetches the page after the one on show in the background; off unless the owner opts in.
+    /// Prefetches the next unscanned source page; off unless the owner opts in.
     @ObservationIgnored var prefetchesNextPage = false
-    /// Told every thumbnail address as a page arrives, so the owner can start caching them.
+    /// Announces displayed thumbnails and selected-page previews for image caching.
     @ObservationIgnored var onThumbnailsAvailable: (@MainActor ([URL]) -> Void)?
     @ObservationIgnored private let service: PixivService
     @ObservationIgnored private let sessions: any PixivSessionStoring
@@ -78,20 +78,16 @@ final class PixivStore {
     var isSignedIn: Bool { session != nil }
 
     /// Commits `query`, as far as the account allows (see `PixivQuery.sanitized(signedIn:)`).
-    /// A different listing, or `refresh`, fetches its first page afresh; otherwise only the
-    /// app-side filters changed and the page on show is filtered again, or, while it is still
-    /// loading, published with them when it arrives.
+    /// Filter changes restart at the first matching page and reuse cached source pages.
     func apply(_ query: PixivQuery, refresh: Bool = false) {
         let query = query.sanitized(signedIn: isSignedIn)
+        let unchanged = self.query == query
         self.query = query
-        if !refresh, cacheListing == query.listing {
-            if isLoading { return }
-            if committedQuery?.listing == query.listing, let cached = cachedPages[page] {
-                publish(cached, for: query)
-                return
-            }
+        if !refresh, unchanged, cacheListing == query.listing,
+            isLoading || (hasLoaded && committedQuery == query && errorMessage == nil) {
+            return
         }
-        resetCache(for: query.listing)
+        if refresh || cacheListing != query.listing { resetCache(for: query.listing) }
         load(page: 1, of: query)
     }
 
@@ -168,13 +164,14 @@ final class PixivStore {
     }
 
     /// Forgets the session, here and in the keychain, and shows what an anonymous visitor
-    /// sees. pixiv itself keeps the session until it expires or is signed out on pixiv.
-    func signOut() {
+    /// sees. pixiv itself keeps the session until it expires or is signed out on pixiv. Throws,
+    /// still signed in, when the keychain keeps the saved session: the next launch would restore it.
+    func signOut() throws {
+        try sessions.remove()
         restoreTask?.cancel()
         signInTask?.cancel()
         signInTask = nil
         isSigningIn = false
-        sessions.remove()
         accountMessage = nil
         use(nil, account: nil)
     }
@@ -225,7 +222,8 @@ final class PixivStore {
                 self.account = account
             } else {
                 AppLog.info("pixiv ended the saved sign-in")
-                self.sessions.remove()
+                // A saved copy the keychain keeps signs no one in; the store logs why.
+                try? self.sessions.remove()
                 self.use(nil, account: nil)
                 self.accountMessage = PixivFailure(code: .signedOut).localizedDescription
             }
@@ -330,7 +328,6 @@ final class PixivStore {
             try Task.checkCancellation()
             if let self, self.cacheID == cacheID {
                 self.cachedPages[number] = result
-                self.onThumbnailsAvailable?(result.works.compactMap(\.thumbnailURL))
             }
             return result
         }
@@ -341,11 +338,13 @@ final class PixivStore {
     private func load(page number: Int, of query: PixivQuery) {
         loadTask?.cancel()
         if cacheListing != query.listing { resetCache(for: query.listing) }
+        if committedQuery != query { clearResults() }
         generation = UUID()
         errorMessage = nil
-        if let cached = cachedPages[number] {
+        let cached = filteredResults(for: query)
+        if cached.complete || (query.listing.isSearch && cached.works.count > number * cached.pageSize) {
             isLoading = false
-            publish(cached, for: query)
+            publish(cached, page: number, for: query)
             return
         }
         let requestID = generation
@@ -354,15 +353,18 @@ final class PixivStore {
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await self.fetch(number, of: listing).value
-                guard self.generation == requestID, !Task.isCancelled else { return }
-                // Filters changed while the page loaded apply to it as it arrives.
-                self.publish(result, for: self.query.listing == listing ? self.query : query)
+                var result = cached
+                while !result.complete && (!listing.isSearch || result.works.count <= number * result.pageSize) {
+                    _ = try await self.fetch(result.nextPage, of: listing).value
+                    guard self.generation == requestID, !Task.isCancelled else { return }
+                    result = self.filteredResults(for: query, continuing: result)
+                }
+                self.publish(result, page: number, for: query)
             } catch {
                 guard self.generation == requestID, !Task.isCancelled else { return }
                 // Another listing failed to open: the works on show answer the one it was to
                 // replace, so they go too, rather than showing under it and paging it on Next.
-                if self.committedQuery?.listing != listing { self.clearResults() }
+                if self.committedQuery != query { self.clearResults() }
                 self.errorMessage = error.localizedDescription
                 self.failedPage = number
                 self.committedQuery = query
@@ -379,22 +381,50 @@ final class PixivStore {
         page = 1
         totalPages = 1
         totalCount = 0
+        hasExactTotal = false
         hasLoaded = false
     }
 
-    private func publish(_ result: PixivResultPage, for query: PixivQuery) {
-        works = result.works.filter(query.admits)
-        hiddenCount = result.works.count - works.count
-        totalPages = min(PixivService.maxPages, max(1, result.totalPages, result.page))
-        totalCount = result.totalCount
-        page = min(totalPages, max(1, result.page))
+    private struct FilteredResults {
+        var works: [PixivWork] = []
+        var seen: Set<String> = []
+        var hidden = 0
+        var nextPage = 1
+        var complete = false
+        let pageSize: Int
+    }
+
+    private func filteredResults(for query: PixivQuery, continuing previous: FilteredResults? = nil) -> FilteredResults {
+        var result = previous ?? FilteredResults(
+            pageSize: query.listing.isSearch ? PixivService.searchPageSize : PixivService.rankingPageSize)
+        while let source = cachedPages[result.nextPage] {
+            for work in source.works where result.seen.insert(work.id).inserted {
+                if query.admits(work) { result.works.append(work) } else { result.hidden += 1 }
+            }
+            result.nextPage += 1
+            if result.nextPage > min(PixivService.maxPages, max(1, source.totalPages)) {
+                result.complete = true
+                break
+            }
+        }
+        if query.ratings.isEmpty { result.complete = true }
+        return result
+    }
+
+    private func publish(_ result: FilteredResults, page number: Int, for query: PixivQuery) {
+        totalCount = result.works.count
+        totalPages = max(1, (totalCount + result.pageSize - 1) / result.pageSize)
+        page = min(totalPages, max(1, number))
+        works = Array(result.works.dropFirst((page - 1) * result.pageSize).prefix(result.pageSize))
+        hiddenCount = result.hidden
+        hasExactTotal = result.complete
         hasLoaded = true
         committedQuery = query
         errorMessage = nil
         failedPage = nil
-        // A failed prefetch is simply retried as an ordinary load when the user gets there.
-        if prefetchesNextPage, page < totalPages, cachedPages[page + 1] == nil {
-            _ = fetch(page + 1, of: query.listing)
+        onThumbnailsAvailable?(works.compactMap(\.thumbnailURL))
+        if prefetchesNextPage, !result.complete, cachedPages[result.nextPage] == nil {
+            _ = fetch(result.nextPage, of: query.listing)
         }
     }
 }

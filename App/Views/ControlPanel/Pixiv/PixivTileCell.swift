@@ -88,48 +88,34 @@ struct PixivTileCell: View {
   }
 }
 
-/// The picture of a tile, dimmed while a ring is over it.
+/// The picture of a tile, darkened while a ring is over it the way a Steam Workshop tile's is.
 private struct PixivTileArtwork: View {
   let tile: PixivTile
   let ringAction: (PixivTile.Ring) -> Void
 
+  @Environment(\.panelTheme) private var theme
+
   var body: some View {
     ZStack {
       PanelImage(source: tile.image, pointSize: 180)
-        .saturation(tile.ring == nil ? 1 : 0.85)
-        .brightness(tile.ring == nil ? 0 : -0.28)
       if let ring = tile.ring {
+        theme.surface.scrim.color
         PixivTileRing(state: ring.state) { ringAction(ring) }
       }
     }
   }
 }
 
-/// The marks in a tile's top leading corner: the saved check, and on a compact tile R-18 beneath
-/// it, where no other corner's mark can meet them.
+/// The marks in a tile's top leading corner: the library mark of a saved page, and on a compact tile
+/// R-18 beneath it, where no other corner's mark can meet them.
 private struct PixivTileLeadingMarks: View {
   let corners: PixivTileCorners
 
   var body: some View {
     VStack(alignment: .leading, spacing: 3) {
-      if corners.showsSaved { PixivSavedMark(isCompact: corners.isCompact) }
+      if corners.showsSaved { TileMarkChip(.inLibrary, isCompact: corners.isCompact) }
       if corners.isCompact, corners.showsMature { PixivMatureBadge(isCompact: true) }
     }
-  }
-}
-
-/// The check in the corner of a tile of which a page is in the library.
-private struct PixivSavedMark: View {
-  let isCompact: Bool
-
-  var body: some View {
-    Image(systemName: "checkmark")
-      .font(.system(size: isCompact ? 8 : 9.5, weight: .bold))
-      .foregroundStyle(.white)
-      .frame(width: isCompact ? 16 : 20, height: isCompact ? 16 : 20)
-      .background(.black.opacity(0.6), in: Circle())
-      .help(L("In your library"))
-      .accessibilityHidden(true)
   }
 }
 

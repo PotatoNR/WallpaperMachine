@@ -94,29 +94,6 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
     XCTAssertEqual(DisplaySleepAction.allCases.map(\.rawValue), ["pause", "stop"])
   }
 
-  /// An unknown backend name is refused instead of falling back to Compatibility behind the user's
-  /// back: the typed choice has no way to name one.
-  func testVideoBackendAndSceneRendererOfferOnlyTheNamesTheEngineAccepts() async throws {
-    XCTAssertNil(VideoBackendMode(rawValue: "native"))
-    XCTAssertNil(VideoBackendMode(rawValue: ""))
-    XCTAssertEqual(VideoBackendMode.allCases.map(\.rawValue), ["compatibility", "native_preferred"])
-    for rejected in ["metal", "native_preferred", "NativeMetalPreferred", ""] {
-      XCTAssertNil(SceneRendererMode(rawValue: rejected), rejected)
-    }
-    XCTAssertEqual(
-      SceneRendererMode.allCases.map(\.rawValue), ["compatibility", "native_metal_preferred"])
-
-    try await withRecordingPanel { panel, bridge in
-      try await panel.controller.setVideoBackend(.nativePreferred)
-      XCTAssertEqual(bridge.videoBackendCalls, ["native_preferred"])
-      XCTAssertEqual(panel.controller.performanceSettings.videoBackend, .nativePreferred)
-
-      try await panel.controller.setSceneRenderer(.nativeMetalPreferred)
-      XCTAssertEqual(bridge.sceneRendererCalls, ["native_metal_preferred"])
-      XCTAssertEqual(panel.controller.performanceSettings.sceneRenderer, .nativeMetalPreferred)
-    }
-  }
-
   /// The choice is by the names the engine accepts, ships on the display and comes back as the engine
   /// answered it. A name the typed choice cannot make is not offered, so the engine never has to refuse
   /// one the panel sent.
@@ -141,6 +118,67 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
       try await panel.controller.setSceneResolution(.display)
       XCTAssertEqual(bridge.sceneResolutionCalls, ["canvas", "display"])
       XCTAssertEqual(panel.controller.performanceSettings.sceneResolution, .display)
+    }
+  }
+
+  /// The scene quality ships as Wallpaper Engine's first-run Medium preset, each row sends the saved
+  /// quality with only its own field changed, and the state is what the engine answered.
+  func testSceneQualityShipsAsWallpaperEnginesMediumPresetAndEachRowChangesOneField() async throws {
+    try await withRecordingPanel { panel, bridge in
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings()
+      XCTAssertEqual(
+        panel.controller.performanceSettings.sceneQuality,
+        BridgeSceneQuality(
+          msaa: .off, shadows: .medium, volumetrics: .medium, reflections: true,
+          postProcessing: .enabled))
+
+      try await panel.controller.setSceneMSAA(.x4)
+      try await panel.controller.setSceneShadows(.ultra)
+      try await panel.controller.setSceneVolumetrics(.off)
+      try await panel.controller.setSceneReflections(false)
+      try await panel.controller.setScenePostProcessing(.displayHdr)
+      XCTAssertEqual(bridge.sceneQualityCalls.count, 5)
+      XCTAssertEqual(bridge.sceneQualityCalls.first?.msaa, .x4)
+      XCTAssertEqual(bridge.sceneQualityCalls.first?.shadows, .medium, "one row changes one field")
+      XCTAssertEqual(
+        panel.controller.performanceSettings.sceneQuality,
+        BridgeSceneQuality(
+          msaa: .x4, shadows: .ultra, volumetrics: .off, reflections: false,
+          postProcessing: .displayHdr))
+      XCTAssertEqual(BridgePostProcessing.allCases, [.disabled, .enabled, .ultra, .displayHdr])
+    }
+  }
+
+  /// Quality in force is the renderer's read-back, line by line, never the saved preference.
+  func testQualityInForceIsTheRenderersReadBack() async throws {
+    try await withRecordingPanel { panel, _ in
+      let drawn = BridgeSceneQuality(
+        msaa: .off, shadows: .off, volumetrics: .off, reflections: true, postProcessing: .ultra)
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings(
+        sceneQuality: BridgeSceneQuality(
+          msaa: .x8, shadows: .ultra, volumetrics: .ultra, reflections: true, postProcessing: .ultra),
+        sceneRenderers: [
+          BridgeSceneBackendReport(
+            displayId: 7, displayName: "Studio Display", wallpaperId: "rain-1",
+            wallpaperTitle: "Rain", backend: "native_metal", failureStage: nil, failureReason: nil,
+            videoPath: "none", optimizationApplied: true, qualityInForce: drawn)
+        ])
+      let reports = panel.controller.performanceSettings.sceneQualityInForce
+      XCTAssertEqual(reports.map(\.quality), [drawn])
+      XCTAssertEqual(
+        reports.first?.line,
+        "Studio Display — Rain: Antialiasing off, Shadows: Off, Volumetrics: Off, Reflections on, Post-processing: Ultra")
+    }
+  }
+
+  func testResetAllSettingsReturnsTheSceneQualityToWallpaperEnginesDefault() async throws {
+    try await withRecordingPanel { panel, bridge in
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings(
+        sceneQuality: BridgeSceneQuality(
+          msaa: .x2, shadows: .low, volumetrics: .low, reflections: false, postProcessing: .disabled))
+      panel.dialogs.confirmAnswer = true
+      try await panel.controller.resetAllSettings()
+      XCTAssertEqual(bridge.sceneQualityCalls, [.wallpaperEngineDefault])
     }
   }
 
@@ -172,6 +210,24 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
     }
   }
 
+  func testMetalFXUpscalingShipsOffAndRoundTripsThroughItsSwitch() async throws {
+    try await withRecordingPanel { panel, bridge in
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings()
+      let controller = panel.controller
+      XCTAssertFalse(controller.isSwitchOn(.metalFXUpscaling), "An extra pass per frame ships off")
+
+      try await controller.setSwitch(.metalFXUpscaling, to: true)
+      XCTAssertEqual(bridge.metalFXUpscalingCalls, [true])
+      XCTAssertTrue(
+        controller.isSwitchOn(.metalFXUpscaling),
+        "The state is the one the engine returned, not the click")
+
+      try await controller.setSwitch(.metalFXUpscaling, to: false)
+      XCTAssertEqual(bridge.metalFXUpscalingCalls, [true, false])
+      XCTAssertFalse(controller.isSwitchOn(.metalFXUpscaling))
+    }
+  }
+
   func testSceneOnDemandAndDirectVideoPlaneSamplingShipOffAndRoundTrip() async throws {
     try await withRecordingPanel { panel, bridge in
       panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings()
@@ -180,19 +236,38 @@ final class PanelPerformanceSettingsTests: PanelTestCase {
       XCTAssertFalse(
         shipped.sceneVideoPlaneSampling,
         "A sampling path whose equivalence is bounded rather than total ships off")
-      XCTAssertFalse(shipped.contentPacing)
-      XCTAssertFalse(shipped.sharedVideoDecode)
 
       try await panel.controller.setSceneOnDemand(true)
       try await panel.controller.setSceneVideoPlaneSampling(true)
-      try await panel.controller.setContentPacing(true)
-      try await panel.controller.setSharedVideoDecode(true)
       XCTAssertEqual(bridge.sceneOnDemandCalls, [true])
       XCTAssertEqual(bridge.sceneVideoPlaneSamplingCalls, [true])
-      XCTAssertEqual(bridge.contentPacingCalls, [true])
-      XCTAssertEqual(bridge.sharedVideoDecodeCalls, [true])
       let on = panel.controller.performanceSettings
-      XCTAssertTrue(on.sceneOnDemand && on.sceneVideoPlaneSampling && on.contentPacing && on.sharedVideoDecode)
+      XCTAssertTrue(on.sceneOnDemand && on.sceneVideoPlaneSampling)
+    }
+  }
+
+  func testDisplayFramingShipsOffAndTheSwitchRoundTrips() async throws {
+    try await withRecordingPanel { panel, bridge in
+      panel.store.settingsSnapshot = BridgeSnapshotFixtures.settings()
+      let controller = panel.controller
+      XCTAssertFalse(
+        controller.performanceSettings.sceneDisplayFraming,
+        "Drawing only the visible part moves a few pixels, so it ships off")
+      XCTAssertFalse(controller.isSwitchOn(.sceneDisplayFraming))
+
+      try await controller.setSwitch(.sceneDisplayFraming, to: true)
+      XCTAssertEqual(bridge.sceneDisplayFramingCalls, [true])
+      XCTAssertTrue(
+        controller.isSwitchOn(.sceneDisplayFraming),
+        "The state is the one the engine returned, not the click")
+      XCTAssertTrue(controller.performanceSettings.sceneDisplayFraming)
+      XCTAssertFalse(
+        controller.performanceSettings.sceneVideoPlaneSampling,
+        "One experimental switch does not turn another on")
+
+      try await controller.setSwitch(.sceneDisplayFraming, to: false)
+      XCTAssertEqual(bridge.sceneDisplayFramingCalls, [true, false])
+      XCTAssertFalse(controller.isSwitchOn(.sceneDisplayFraming))
     }
   }
 

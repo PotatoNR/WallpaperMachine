@@ -183,8 +183,8 @@ extension PanelController {
 
   /// The factor a stage request may set right now, or the refusal when the card it came from no
   /// longer matches what is selected, checked and configured. Only Fill turns a factor into a
-  /// crop; both video backends apply it (`NativeVideoLayout`, Compatibility), so which one plays
-  /// the clip does not matter.
+  /// crop; both video players apply it (`NativeVideoLayout`), so which one plays the clip does
+  /// not matter.
   private func stagedLetterboxFactor(id: String, displayID: String) throws -> LetterboxStage {
     guard let context = letterboxContext(), context.wallpaperID == id,
       context.displayID == displayID, context.eligible, context.scalingMode == .fill,
@@ -257,7 +257,7 @@ extension PanelController {
     let configuration = options?.displayConfigurations.first { $0.displayId == displayID }
     return LetterboxContext(
       wallpaperID: id, displayID: displayID,
-      eligible: display?.enabled == true && display?.mode == .standalone && options != nil,
+      eligible: display?.isIndependent == true && options != nil,
       scalingMode: configuration?.scalingMode ?? display?.scalingMode,
       scalingFactor: configuration?.scalingFactor ?? display?.scalingFactor,
       draftPending: options?.dirty == true)

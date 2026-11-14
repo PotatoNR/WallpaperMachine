@@ -19,7 +19,7 @@ struct TagChip: View {
 
   var body: some View {
     Text(verbatim: text)
-      .font(.system(size: 11, weight: .medium))
+      .font(.panel(.controlSmall))
       .strikethrough(selection == .excluded)
       .foregroundStyle(foreground)
       .lineLimit(1)

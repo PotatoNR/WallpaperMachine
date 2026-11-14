@@ -35,7 +35,7 @@ struct DownloadRequestRow: Identifiable, Equatable {
   init(_ request: WorkshopDownloadRequest, stage: WorkshopDownloadStage, appliesOnArrival: Bool) {
     self.init(
       id: request.id, wallpaperID: request.item?.id,
-      title: request.item?.title ?? WorkshopDownloadStage.itemlessTitle(id: request.id),
+      title: request.item?.title ?? WorkshopDownloadStage.itemlessTitle,
       image: request.item?.thumbnail, account: request.account,
       rememberSession: request.rememberSession, stage: stage, isPaused: request.isPaused,
       appliesOnArrival: appliesOnArrival)
@@ -43,11 +43,9 @@ struct DownloadRequestRow: Identifiable, Equatable {
 }
 
 extension WorkshopDownloadStage {
-  /// The title of a job or request that carries no Workshop item: the shared assets or a sign-in.
+  /// The title of a job or request that carries no Workshop item: the shared assets.
   @MainActor
-  static func itemlessTitle(id: String) -> String {
-    id == WorkshopStore.signInRequestID ? L("Steam sign-in") : L("Scene assets")
-  }
+  static var itemlessTitle: String { L("Scene assets") }
 
   /// What a retained request is waiting for, in one line.
   @MainActor

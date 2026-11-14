@@ -27,6 +27,70 @@ extension PanelController {
     try await run(.queued) { UserAssetStorage.revealManagedDirectory() }
   }
 
+  // MARK: Library location
+
+  // A move is not queued: the copy can take minutes, and wallpapers keep switching meanwhile. The
+  // store refuses a second one while one copies. The folder picker and the confirmation come first.
+
+  /// `moveLibrary`: asks for a folder, checks it, says what the move copies and where, and prepares
+  /// the move for the next launch.
+  func moveLibrary() async throws {
+    errors.clearAction()
+    let panel = NSOpenPanel()
+    panel.title = L("Move Wallpaper Library")
+    panel.message = L(
+      "Choose where to keep the wallpaper library and downloads, such as an external drive. WallpaperMachine creates a folder named WallpaperMachine there.")
+    panel.prompt = L("Choose")
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
+    guard let folder = await dialogs.choose(panel) else { return }
+    try await prepareLibraryMove(to: folder)
+  }
+
+  /// `moveLibraryToThisMac`: brings the library and the downloads back into WallpaperMachine's own
+  /// folder on this Mac, after a confirmation.
+  func moveLibraryToThisMac() async throws {
+    errors.clearAction()
+    try await prepareLibraryMove(to: nil)
+  }
+
+  private func prepareLibraryMove(to folder: URL?) async throws {
+    let plan = try await libraryLocation.plan(moveTo: folder)
+    let size = ByteSize.text(Double(plan.bytes), locale: PanelLocale.shared.locale)
+    let destination = plan.targetRoot.path
+    let detail =
+      plan.copies
+      ? L(
+        "WallpaperMachine copies \(size) to “\(destination)” now, and you can keep using it meanwhile. The move finishes the next time you open WallpaperMachine, which then deletes the old copy.")
+      : L("The library and downloads move to “\(destination)” the next time you open WallpaperMachine.")
+    let title = folder == nil ? L("Move the wallpaper library back to this Mac?") : L("Move the wallpaper library?")
+    guard await dialogs.confirm(title, detail: detail, button: L("Move")) else { return }
+    try await run(.immediate) { try await libraryLocation.move(plan) }
+  }
+
+  /// `cancelLibraryCopy`: stops the copy being prepared and removes what it copied.
+  func cancelLibraryCopy() async throws {
+    try await run(.immediate) { libraryLocation.cancel() }
+  }
+
+  /// `cancelLibraryMove`: forgets the move waiting for the next launch and removes its copy.
+  func cancelLibraryMove() async throws {
+    try await run(.immediate) { try libraryLocation.cancelPending() }
+  }
+
+  /// The banner line while the library's drive is disconnected and its wallpapers are stopped; nil
+  /// while it is connected.
+  var libraryDriveMessage: String? {
+    libraryLocation.disconnectedRoot.map { root in
+      L(
+        "Wallpaper library unavailable: the drive that holds “\(root.path)” was disconnected, so its wallpapers stopped. They come back when you connect it again."
+      )
+    }
+  }
+
   // MARK: Clearing
 
   /// Asks, then queues `operation`. Returns whether the user agreed.
@@ -56,8 +120,9 @@ extension PanelController {
     ) { try store.clearLogsAsync() }
   }
 
-  /// `purgeUnreferencedUserAssets`: removes the caches no manifest lists, after a confirmation, and
-  /// remembers how much that released.
+  /// `purgeUnreferencedUserAssets`: removes the caches no manifest lists and the playable video
+  /// copies nothing is reading now (`DerivedVideoCache`), after a confirmation, and remembers
+  /// how much that released.
   ///
   /// Named for what it does: the manifest's files are user-imported originals that nothing can
   /// regenerate, so the confirmation says what is kept, not only what goes.
@@ -68,7 +133,8 @@ extension PanelController {
         "Only caches that can be rebuilt are removed. Files you chose in wallpaper settings are kept."),
       button: L("Clear Caches")
     ) {
-      let released = try await UserAssetStorage.purgeUnreferencedDerivedCaches()
+      let copies = await Task.detached { DerivedVideoCache.shared.removeUnused() }.value
+      let released = try await UserAssetStorage.purgeUnreferencedDerivedCaches() + copies
       // A negative figure would be a bug in the accounting, not a real amount, so it is reported as
       // nothing released rather than wrapped.
       userAssetsReleasedBytes = UInt64(max(0, released))
@@ -102,8 +168,8 @@ extension PanelController {
     var environment = DiagnosticEnvironment.current()
     environment.append(
       """
-      settings: scene renderer \(settings.sceneRenderer), scene resolution \(settings.sceneResolution), \
-      video backend \(settings.videoBackend), render scale \(settings.renderScale) (preferred \(settings.preferredRenderScale)), battery mode \
+      settings: scene resolution \(settings.sceneResolution), \
+      render scale \(settings.renderScale) (preferred \(settings.preferredRenderScale)), battery mode \
       \(settings.batteryMode), frame-rate cap \(settings.frameRateCap.map(String.init) ?? "none"), on battery \
       \(settings.onBatteryPower), reduced quality for \(throttle.isEmpty ? "nothing" : throttle), effective \
       frame-rate cap \(settings.effectiveFrameRateCap.map(String.init) ?? "none"), verbose logging \

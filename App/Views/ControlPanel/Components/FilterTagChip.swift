@@ -23,7 +23,7 @@ struct FilterTagChip<Label: View>: View {
         }
         label
       }
-      .font(.system(size: 11, weight: .medium))
+      .font(.panel(.controlSmall))
       .strikethrough(selection == .excluded)
       .foregroundStyle(foreground)
       .lineLimit(1)

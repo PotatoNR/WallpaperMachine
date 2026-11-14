@@ -5,7 +5,7 @@ import SwiftUI
 struct PerformanceSettingsSection: View {
   private static let energy = SettingsItem.Group("energy", title: "Energy use")
   private static let quality = SettingsItem.Group("quality", title: "Quality")
-  private static let video = SettingsItem.Group("video", title: "Video backend")
+  private static let video = SettingsItem.Group("video", title: "Video playback")
   private static let scene = SettingsItem.Group("scene", title: "Scene wallpapers")
   private static let experimental = SettingsItem.Group("experimental", title: "Experimental")
 
@@ -16,7 +16,7 @@ struct PerformanceSettingsSection: View {
     note:
       "Right after you apply a wallpaper, these figures include loading it, which can take several watts for a few seconds.",
     keywords: [
-      "Unavailable on this Mac", "Measuring…", "Native video not counted",
+      "Unavailable on this Mac", "Measuring…", "Video not counted",
       "GPU shared with other apps", "Low energy use", "Medium energy use", "High energy use",
     ])
   static let energyMethod = SettingsItem(
@@ -33,7 +33,7 @@ struct PerformanceSettingsSection: View {
     id: "performance.frame-rate-limit", section: .performance, group: quality,
     title: "Frame rate limit",
     note:
-      "At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps every display; saved per-display frame rates are not rewritten.",
+      "At the top of the slider there is no limit, and each display runs at its own frame rate: up to 60 fps unless you chose more for it. A lower value caps scenes and web wallpapers on every display, while a video plays at its own frame rate; saved per-display frame rates are not rewritten.",
     keywords: ["No limit"])
   static let renderScale = SettingsItem(
     id: "performance.render-scale", section: .performance, group: quality,
@@ -41,6 +41,11 @@ struct PerformanceSettingsSection: View {
     note:
       "Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.",
     keywords: ["Not applicable to the wallpapers currently running", "100% (native)"])
+  static let metalFXUpscaling = SettingsItem(
+    id: "performance.metalfx-upscaling", section: .performance, group: quality,
+    title: "MetalFX upscaling",
+    note:
+      "Below 100%, scenes are brought back to full size with Apple’s MetalFX upscaler instead of being stretched. Hard edges can look slightly sharper, but every frame needs extra GPU work, which can raise energy use noticeably. Web and video wallpapers aren’t affected.")
   /// What the engine uses now where it differs from the saved Frame rate limit and render scale,
   /// and which condition lowers them.
   static let renderScaleEffective = SettingsItem(
@@ -53,16 +58,36 @@ struct PerformanceSettingsSection: View {
       "Display resolution draws a 2D scene at the size it covers on your display, as Wallpaper Engine does, which keeps it sharp on a high-resolution screen. Canvas size draws it at the size its author made it and stretches the result, which uses the least GPU and memory. Internal render scale applies on top. Perspective scenes and videos aren’t affected.",
     keywords: ["Display resolution", "Canvas size"])
 
+  // Scene quality: Wallpaper Engine's own settings (defaults are its first-run Medium preset).
+  static let msaa = SettingsItem(
+    id: "performance.msaa", section: .performance, group: quality, title: "Antialiasing (MSAA)",
+    note:
+      "Smooths the edges of 3D models; scenes without one are not affected. Changing it loads running scenes again.",
+    keywords: ["Off"])
+  static let shadows = SettingsItem(
+    id: "performance.shadows", section: .performance, group: quality, title: "Shadows",
+    note: "Detail of the shadows lit 3D scenes cast. Changing it loads running scenes again.",
+    keywords: ["Off", "Low", "Medium", "High", "Ultra"])
+  static let volumetrics = SettingsItem(
+    id: "performance.volumetrics", section: .performance, group: quality, title: "Volumetrics",
+    note: "Light shafts and fog volumes in 3D scenes. Changing it loads running scenes again.",
+    keywords: ["Off", "Low", "Medium", "High", "Ultra"])
+  static let reflections = SettingsItem(
+    id: "performance.reflections", section: .performance, group: quality, title: "Reflections",
+    note:
+      "Lets reflective materials show the scene around them. Changing it loads running scenes again.")
+  static let postProcessing = SettingsItem(
+    id: "performance.post-processing", section: .performance, group: quality,
+    title: "Post-processing",
+    note:
+      "How much of a scene’s bloom and HDR is drawn; HDR needs Ultra or Display HDR. Changing it loads running scenes again.",
+    keywords: ["Disabled", "Enabled", "Ultra", "Display HDR"])
+
   // Advanced
   static let advanced = SettingsItem(
     id: "performance.advanced", section: .performance, title: "Advanced",
-    note: "Renderers & experimental options")
+    note: "Diagnostics & experimental options")
 
-  static let videoBackend = SettingsItem(
-    id: "performance.video-backend", section: .performance, group: video, inside: advanced,
-    title: "Video playback",
-    note: "Native plays supported videos through macOS and uses Compatibility for the rest.",
-    keywords: ["Compatibility", "Native video preferred"])
   static let videoDiagnostics = SettingsItem(
     id: "performance.video-diagnostics", section: .performance, group: video, inside: advanced,
     title: "Live diagnostics")
@@ -71,16 +96,11 @@ struct PerformanceSettingsSection: View {
     inside: videoDiagnostics, title: "In use now",
     keywords: ["No video wallpaper is running."])
 
-  static let sceneRenderer = SettingsItem(
-    id: "performance.scene-renderer", section: .performance, group: scene, inside: advanced,
-    title: "Scene renderer",
-    note: "Unsupported scenes use Compatibility. Lock screen playback always uses Compatibility.",
-    keywords: ["Compatibility", "Native Metal preferred"])
   static let sceneOptimization = SettingsItem(
     id: "performance.scene-optimization", section: .performance, group: scene, inside: advanced,
     title: "Scene render optimisation",
     note:
-      "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Works with both scene renderers. Turn it off to compare.",
+      "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Turn it off to compare.",
     keywords: [
       "How much can be skipped depends on the scene. If everything in it moves, nothing is skipped."
     ])
@@ -100,6 +120,10 @@ struct PerformanceSettingsSection: View {
   static let sceneInForce = SettingsItem(
     id: "performance.scene-in-force", section: .performance, group: scene,
     inside: sceneDiagnostics, title: "In force now")
+  static let sceneQualityInForce = SettingsItem(
+    id: "performance.scene-quality-in-force", section: .performance, group: scene,
+    inside: sceneDiagnostics, title: "Quality in force",
+    keywords: ["No scene wallpaper is running."])
   static let sceneUpdating = SettingsItem(
     id: "performance.scene-updating", section: .performance, group: scene,
     inside: sceneDiagnostics, title: "Updating now", keywords: ["Retry"])
@@ -107,44 +131,36 @@ struct PerformanceSettingsSection: View {
     id: "performance.scene-compatibility", section: .performance, group: scene, inside: advanced,
     title: "Renderer compatibility")
 
-  static let contentPacing = SettingsItem(
-    id: "performance.content-pacing", section: .performance, group: experimental,
-    inside: advanced, title: "Content pacing",
-    note:
-      "Experimental. Presents frames at the content’s own frame rate instead of the display’s refresh rate."
-  )
-  static let sharedVideoDecode = SettingsItem(
-    id: "performance.shared-video-decode", section: .performance, group: experimental,
-    inside: advanced, title: "Shared video decode",
-    note: "Experimental. Screens showing the same video share one decoder.")
-  static let sharedDecodeInUse = SettingsItem(
-    id: "performance.shared-decode-in-use", section: .performance, group: experimental,
-    inside: advanced, title: "Shared decode in use")
   static let videoPlaneSampling = SettingsItem(
     id: "performance.video-plane-sampling", section: .performance, group: experimental,
     inside: advanced, title: "Direct video plane sampling",
     note:
       "Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. Live diagnostics under Scene wallpapers shows which path each scene uses."
   )
+  static let displayFraming = SettingsItem(
+    id: "performance.display-framing", section: .performance, group: experimental,
+    inside: advanced, title: "Draw only the visible part of cropped scenes",
+    note:
+      "Experimental. When your display crops part of a 2D scene because their shapes differ, draws only the part you see instead of the whole scene. This saves some GPU work and memory, most when much of the scene is cropped. Applies only with 2D scene resolution set to Display resolution, the wallpaper set to Fill or Original size, and MetalFX not upscaling the scene. A few pixels can look very slightly different, mostly along fine lines and at the edges of the screen. Turn it off if something looks wrong."
+  )
 
   static let items = [
-    energyUse, energyMethod, preset, frameRateLimit, renderScale, renderScaleEffective,
-    sceneResolution, advanced, videoBackend, videoDiagnostics, videoInUse, sceneRenderer, sceneOptimization, sceneOnDemand,
-    sceneDiagnostics, sceneDrawnBy, sceneInForce, sceneUpdating, sceneCompatibility,
-    contentPacing, sharedVideoDecode, sharedDecodeInUse, videoPlaneSampling,
+    energyUse, energyMethod, preset, frameRateLimit, renderScale, metalFXUpscaling, renderScaleEffective,
+    sceneResolution, msaa, shadows, volumetrics, reflections, postProcessing, advanced,
+    videoDiagnostics, videoInUse, sceneOptimization, sceneOnDemand,
+    sceneDiagnostics, sceneDrawnBy, sceneInForce, sceneQualityInForce, sceneUpdating, sceneCompatibility,
+    videoPlaneSampling, displayFraming,
   ]
 
   /// The live rows this page leaves out while they have nothing to say, by the values its body
   /// draws them from: Effective now while the saved frame-rate limit and scale are the ones in
-  /// force, In force now while no scene has a backend, and Shared decode in use while nothing is
-  /// shared.
+  /// force, and In force now while no scene has a backend.
   @MainActor
   static func unofferedItems(_ controller: PanelController) -> Set<String> {
     let performance = controller.performanceSettings
     var hidden: [SettingsItem] = []
     if performance.quality.effectiveNowText == nil { hidden.append(renderScaleEffective) }
     if performance.optimization.text == nil { hidden.append(sceneInForce) }
-    if performance.sharedDecode.text == nil { hidden.append(sharedDecodeInUse) }
     return Set(hidden.map(\.id))
   }
 
@@ -161,7 +177,7 @@ struct PerformanceSettingsSection: View {
           SettingsProse {
             Text("macOS shares GPU energy between apps by GPU time.")
             Text(
-              "Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, videos played with Native video, memory and the display itself are not included."
+              "Includes the control panel, the lock screen and the CPU side of video decoding. Screen compositing, the hardware video decoder, memory and the display itself are not included."
             )
             Text("Low: below 0.5 W. Medium: 0.5 W to below 2 W. High: 2 W or more.")
             Text("Change a quality setting below to compare energy use.")
@@ -186,6 +202,7 @@ struct PerformanceSettingsSection: View {
             }, isEnabled: performance.canChangeRenderScale
           ) { try await controller.setRenderScale(Double($0)) }
         }
+        SettingsRow(Self.metalFXUpscaling) { SettingsSwitchControl(key: .metalFXUpscaling) }
         if let effective = performance.quality.effectiveNowText {
           SettingsRow(Self.renderScaleEffective) {
             SettingsStatusText(text: effective) {
@@ -207,6 +224,33 @@ struct PerformanceSettingsSection: View {
             }
           ) { try await controller.setSceneResolution($0) }
         }
+        SettingsRow(Self.msaa) {
+          SettingsMenuControl(
+            key: "sceneMSAA", saved: performance.sceneQuality.msaa,
+            options: BridgeMsaa.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneMSAA($0) }
+        }
+        SettingsRow(Self.shadows) {
+          SettingsMenuControl(
+            key: "sceneShadows", saved: performance.sceneQuality.shadows,
+            options: BridgeQualityLevel.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneShadows($0) }
+        }
+        SettingsRow(Self.volumetrics) {
+          SettingsMenuControl(
+            key: "sceneVolumetrics", saved: performance.sceneQuality.volumetrics,
+            options: BridgeQualityLevel.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneVolumetrics($0) }
+        }
+        SettingsRow(Self.reflections) { SettingsSwitchControl(key: .sceneReflections) }
+        SettingsRow(Self.postProcessing) {
+          SettingsMenuControl(
+            key: "scenePostProcessing", saved: performance.sceneQuality.postProcessing,
+            options: BridgePostProcessing.allCases.map {
+              SettingsMenuOption(value: $0, title: $0.title)
+            }
+          ) { try await controller.setScenePostProcessing($0) }
+        }
       }
       SettingsGroupDisclosure(Self.advanced) {
         videoGroup(performance)
@@ -220,14 +264,6 @@ struct PerformanceSettingsSection: View {
 
   private func videoGroup(_ performance: PerformanceSettings) -> some View {
     SettingsGroup(Self.video, in: .performance) {
-      SettingsRow(Self.videoBackend) {
-        SettingsMenuControl(
-          key: "videoBackend", saved: performance.videoBackend,
-          options: VideoBackendMode.allCases.map {
-            SettingsMenuOption(value: $0, title: $0.title)
-          }
-        ) { try await controller.setVideoBackend($0) }
-      }
       SettingsDisclosure(Self.videoDiagnostics) {
         SettingsRow(Self.videoInUse, stacked: true) {
           report(performance.videoBackends.map(\.line), empty: "No video wallpaper is running.")
@@ -238,14 +274,6 @@ struct PerformanceSettingsSection: View {
 
   private func sceneGroup(_ performance: PerformanceSettings) -> some View {
     SettingsGroup(Self.scene, in: .performance) {
-      SettingsRow(Self.sceneRenderer) {
-        SettingsMenuControl(
-          key: "sceneRenderer", saved: performance.sceneRenderer,
-          options: SceneRendererMode.allCases.map {
-            SettingsMenuOption(value: $0, title: $0.title)
-          }
-        ) { try await controller.setSceneRenderer($0) }
-      }
       SettingsRow(Self.sceneOptimization, note: optimisationNote(performance)) {
         SettingsSwitchControl(key: .sceneOptimization)
       }
@@ -253,18 +281,26 @@ struct PerformanceSettingsSection: View {
       SettingsDisclosure(Self.sceneDiagnostics) {
         SettingsRow(Self.sceneDrawnBy, stacked: true) {
           report(
-            performance.sceneRenderers.map { $0.line(preferred: performance.sceneRenderer) },
+            performance.sceneRenderers.map(\.line),
             empty: "No scene wallpaper is running.")
         }
         if let text = performance.optimization.text {
           SettingsRow(Self.sceneInForce, stacked: true) { Text(verbatim: text).font(.system(size: 12.5)) }
+        }
+        SettingsRow(Self.sceneQualityInForce, stacked: true) {
+          report(
+            performance.sceneQualityInForce.map(\.line),
+            empty: "No scene wallpaper is running.")
         }
         SettingsRow(Self.sceneUpdating, stacked: true) { updating(performance.sceneUpdates) }
       }
       SettingsDisclosure(Self.sceneCompatibility) {
         SettingsProse {
           Text(
-            "Native Metal draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, 3D models, perspective cameras, scene lights, standard effect chains and post-processing, effects that read the previous frame, layer links, and BGRA or 8-bit NV12 video textures. Scenes with anything else, such as lit particles or HDR video, use Compatibility. This applies to desktop wallpapers only; the lock screen always uses Compatibility."
+            "Native Metal is the only scene renderer. It draws a scene only if it supports everything in it: image layers, sprite-sheet animation, 2D puppets with their own skinning shader, 2D sprite, sprite-trail, rope and rope-trail particles, 3D models, perspective cameras, scene lights, standard effect chains and post-processing, effects that read the previous frame, layer links, and BGRA, 8-bit NV12 or 10-bit video textures (HDR video is tone mapped to SDR). This applies to the lock screen and screen saver too."
+          )
+          Text(
+            "A scene it can't draw is not drawn at all: it keeps its last picture, or its preview when it has drawn nothing yet, and the reason appears under “Drawn by”."
           )
         }
       }
@@ -273,25 +309,23 @@ struct PerformanceSettingsSection: View {
 
   private func experimentalGroup(_ performance: PerformanceSettings) -> some View {
     SettingsGroup(Self.experimental, in: .performance) {
-      SettingsRow(Self.contentPacing) { SettingsSwitchControl(key: .contentPacing) }
-      SettingsRow(Self.sharedVideoDecode) { SettingsSwitchControl(key: .sharedVideoDecode) }
-      if let text = performance.sharedDecode.text {
-        SettingsRow(Self.sharedDecodeInUse) { SettingsStatusText(text) }
-      }
       SettingsRow(Self.videoPlaneSampling) {
         SettingsSwitchControl(key: .sceneVideoPlaneSampling)
+      }
+      SettingsRow(Self.displayFraming) {
+        SettingsSwitchControl(key: .sceneDisplayFraming)
       }
     }
   }
 
   // MARK: Pieces
 
-  /// The note of Scene render optimisation, which says more while a running scene is drawn by Native
-  /// Metal, the only drawing it is true of.
+  /// The note of Scene render optimisation, which says more while a running scene is drawn, the only
+  /// time it is true of anything.
   private func optimisationNote(_ performance: PerformanceSettings) -> String? {
     guard performance.nativeSceneRunning else { return nil }
     return L(
-      "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Works with both scene renderers. Turn it off to compare."
+      "Skips rendering work that wouldn’t change the picture, such as parts of a scene that stay the same. Resolution, frame rate and animation speed are unaffected. Turn it off to compare."
     ) + " "
       + L(
         "How much can be skipped depends on the scene. If everything in it moves, nothing is skipped."

@@ -55,8 +55,9 @@ struct PresetsCard: View {
           .frame(maxWidth: .infinity, alignment: .leading)
           .disabled(!bar.canPick(state, isPending: pending))
           .accessibilityLabel("Presets")
+          // A plain button: the accent is Apply wallpaper's or Apply changes'.
           Button("Apply") { apply(chosen) }
-            .buttonStyle(.panelPrimary(size: .compact))
+            .buttonStyle(.panelSecondary(size: .compact))
             .disabled(!bar.canApply(state, isPending: pending))
             .help(applyHelp(chosen))
         }
@@ -89,14 +90,13 @@ struct PresetsCard: View {
               }
               .disabled(pending)
               .help(L("Saves “\(chosen.name)” as a file you can share or keep"))
-              Button("Delete…") { bar.beginDelete(of: chosen) }
-                .buttonStyle(.inspectorDestructiveLink)
+              Button("Delete…", role: .destructive) { bar.beginDelete(of: chosen) }
                 .disabled(pending)
                 .focused($focused, equals: .deleteLink)
                 .onAppear { takeFocus(.deleteLink) }
             }
           }
-          .buttonStyle(.inspectorLink)
+          .buttonStyle(.panelCardLink)
         }
       }
       if let editor = bar.editor {
@@ -108,12 +108,12 @@ struct PresetsCard: View {
             InspectorNote(
               verbatim: L("Delete preset “\(chosen.name)”? The wallpaper keeps its current values."))
             HStack(spacing: 8) {
-              Button("Delete") { delete(chosen) }
-                .buttonStyle(.inspectorSecondary(isDestructive: true))
+              Button("Delete", role: .destructive) { delete(chosen) }
+                .buttonStyle(.panelSecondary(size: .compact))
                 .disabled(pending)
                 .focused($focused, equals: .confirmDelete)
               Button("Cancel") { bar.cancelDelete() }
-                .buttonStyle(.inspectorSecondary)
+                .buttonStyle(.panelSecondary(size: .compact))
             }
           }
           .onAppear { takeFocus(.confirmDelete) }
@@ -161,24 +161,32 @@ struct PresetsCard: View {
         .onSubmit { submit(editor) }
         .onExitCommand { bar.closeEditor() }
         .accessibilityLabel("Preset name")
-        HStack(spacing: 8) {
-          Button {
-            submit(editor)
-          } label: {
-            if case .save = editor.mode {
-              Text("Save preset")
-            } else {
-              Text("Save")
-            }
-          }
-          .buttonStyle(.panelPrimary(size: .compact))
-          .disabled(isPending || editor.trimmedName == nil)
-          Button("Cancel") { bar.closeEditor() }
-            .buttonStyle(.inspectorSecondary)
+        // Side by side where the column holds both whole; one under the other where it does not
+        // (Japanese in the narrowest column), rather than cutting Save preset short.
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: 8) { nameFormButtons(editor, isPending: isPending) }
+          VStack(alignment: .leading, spacing: 8) { nameFormButtons(editor, isPending: isPending) }
         }
       }
       .onAppear { nameFocused = true }
     }
+  }
+
+  @ViewBuilder
+  private func nameFormButtons(_ editor: PresetsBarState.Editor, isPending: Bool) -> some View {
+    Button {
+      submit(editor)
+    } label: {
+      if case .save = editor.mode {
+        Text("Save preset")
+      } else {
+        Text("Save")
+      }
+    }
+    .buttonStyle(.panelPrimary(size: .compact))
+    .disabled(isPending || editor.trimmedName == nil)
+    Button("Cancel") { bar.closeEditor() }
+      .buttonStyle(.panelSecondary(size: .compact))
   }
 
   // MARK: Focus

@@ -34,7 +34,7 @@ struct SettingsPage<Content: View, Accessory: View>: View {
           HStack(spacing: 8) {
             SymbolTile(systemImage: section.systemImage, color: section.tileColor, size: .small)
             Text(verbatim: settings.text(section.title))
-              .font(.system(size: 15, weight: .semibold))
+              .font(.panel(.headline))
               .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             accessory
@@ -44,10 +44,10 @@ struct SettingsPage<Content: View, Accessory: View>: View {
             SymbolTile(systemImage: section.systemImage, color: section.tileColor, size: .large)
             VStack(alignment: .leading, spacing: 2) {
               Text(verbatim: settings.text(section.title))
-                .font(.system(size: 22, weight: .bold))
+                .font(.panel(.pageTitle))
                 .accessibilityAddTraits(.isHeader)
               Text(verbatim: settings.text(section.summary))
-                .font(.system(size: 13))
+                .font(.panel(.body))
                 .foregroundStyle(theme.surface.muted.color)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

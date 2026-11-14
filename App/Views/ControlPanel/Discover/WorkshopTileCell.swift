@@ -68,7 +68,7 @@ struct WorkshopTileCell: View {
       }
       if let ring = tile.download {
         // The picture dims under a ring, so the ring reads on any wallpaper.
-        Color.black.opacity(0.4)
+        theme.surface.scrim.color
         GeometryReader { proxy in
           let diameter = min(WorkshopTileRing.largestDiameter, proxy.size.width * 0.52)
           WorkshopTileRing(state: ring, diameter: diameter) {
@@ -107,78 +107,33 @@ struct WorkshopTileCell: View {
 
   // MARK: Marks
 
-  /// A mark in the tile's top corner, in the order they stack.
-  enum Mark: Hashable {
-    /// The wallpaper is in the library.
-    case installed
-    /// Wallpaper Engine's staff approved it.
-    case approved
-    /// The installed copy is one of the favorites.
-    case favorite
-
-    @MainActor
-    var label: String {
-      switch self {
-      case .installed: L("In your library")
-      case .approved: L("Approved by Wallpaper Engine")
-      case .favorite: L("Favorite")
-      }
-    }
-  }
-
-  static func marks(of tile: WorkshopTile) -> [Mark] {
-    var marks: [Mark] = []
-    if tile.isInstalled { marks.append(.installed) }
+  /// The marks in the tile's top corner, in the order they stack.
+  static func marks(of tile: WorkshopTile) -> [TileMark] {
+    var marks: [TileMark] = []
+    if tile.isInstalled { marks.append(.inLibrary) }
     if tile.item.isApproved { marks.append(.approved) }
     if tile.isFavorite { marks.append(.favorite) }
+    if tile.isSubscribed { marks.append(.subscribed) }
+    if tile.item.isPreset { marks.append(.preset) }
     return marks
   }
 
   /// "Title, Scene, In your library, Favorite": what VoiceOver reads for the tile.
-  private func accessibilityLabel(marks: [Mark]) -> String {
+  private func accessibilityLabel(marks: [TileMark]) -> String {
     ([item.title, item.kindLabel] + marks.map(\.label)).joined(separator: ", ")
   }
 }
 
 /// The marks of a tile, stacked in its top leading corner as small round chips.
 private struct MarkStack: View {
-  let marks: [WorkshopTileCell.Mark]
-
-  @Environment(\.panelTheme) private var theme
+  let marks: [TileMark]
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       ForEach(marks, id: \.self) { mark in
-        chip(mark)
+        TileMarkChip(mark)
       }
     }
-  }
-
-  private func chip(_ mark: WorkshopTileCell.Mark) -> some View {
-    let fill: Color
-    let glyph: Color
-    let symbol: String
-    switch mark {
-    case .installed:
-      fill = theme.accent.primary.color
-      glyph = theme.accent.onPrimary.color
-      symbol = "checkmark"
-    case .approved:
-      fill = .black.opacity(0.58)
-      glyph = theme.surface.approved.color
-      symbol = "trophy.fill"
-    case .favorite:
-      fill = .black.opacity(0.58)
-      glyph = theme.surface.heart.color
-      symbol = "heart.fill"
-    }
-    return Image(systemName: symbol)
-      .font(.system(size: 9.5, weight: .bold))
-      .foregroundStyle(glyph)
-      .frame(width: 20, height: 20)
-      .background(fill, in: Circle())
-      .help(mark.label)
-      .accessibilityHidden(true)
   }
 }
 

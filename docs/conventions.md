@@ -14,9 +14,18 @@ raise the conflict rather than reformatting someone else's code in passing.
   (`Shell/`, `Library/`, `Inspector/`, `Discover/`, `Downloads/`, `Pixiv/`,
   `Settings/`, `Welcome/`) beside the shared `Model/`, `Components/`, `Theme/`,
   `Localization/` and `Images/`.
-- Third-party renderer sources stay under `upstream/renderer/`. Do not add
-  first-party app code there, and do not change vendored sources without
-  recording the revision in `upstream/provenance.json`.
+- Third-party sources stay under `ThirdParty/` (the patched `naga` crate, the
+  MediaRemote adapter, the scene engine's C libraries). Do not add first-party code
+  there, and do not change vendored sources without recording the revision in
+  `ThirdParty/provenance.json`.
+- Renderer code goes in `Renderer/`: the Rust crates (`Shader/`, `Core/`, `Bridge/`),
+  the scene engine (`Engine/`) and the other C++ areas (`Renderer/<Area>/`, never
+  under `ThirdParty/`): pure C++17 until a layer needs a platform API, written from
+  public specifications rather than copied from another implementation, with its
+  tests in `Renderer/<Area>/tests/` registered in `scripts/check_renderer.py`
+  (today `Renderer/Media/`, `Renderer/Sound/` and `Renderer/Surface/`, see
+  [container-readers.md](container-readers.md), [sound-decoding.md](sound-decoding.md) and
+  [scene rendering](features/scene-rendering.md#when-native-metal-cannot-draw-a-scene)).
 - Tests go in `Tests/Unit/<Domain>/` (non-interactive) or `Tests/UI/`
   (XCUITest, takes over the desktop).
 - Developer commands go in `scripts/`; their shared helpers in `scripts/lib/`;
@@ -73,8 +82,9 @@ Adding a new target, source directory, resource or build setting means editing
   prompt) uses `PanelLocale.shared.catalogString(_:)`. A literal must equal its
   catalog key exactly, interpolations included (`"\(count) wallpapers"` with an
   `Int` is the key `%lld wallpapers`), or it renders English; a ternary of two
-  literals is a `String`, not a key. A new string goes into every shipped catalog
-  in the same change; a new language follows [localization.md](localization.md)
+  literals is a `String`, not a key. A new string goes into the catalog of each
+  target that shows it, in every language that catalog ships, in the same change
+  (a string only the app shows stays out of the extension's); a new language follows [localization.md](localization.md)
   and is declared in `AppLanguage.supported`. Translate labels, never identifiers,
   option values, paths or third-party content; write whole phrases with
   placeholders instead of assembling sentences from English fragments. Missing
@@ -86,7 +96,7 @@ Adding a new target, source directory, resource or build setting means editing
   the real library.
 - **`App/Bridge/Generated/` is build output.** It is written by `uniffi-bindgen`
   during [the build](build.md); hand edits are lost on the next build. Change the
-  bridge crate under `upstream/renderer/` and regenerate.
+  bridge crate in `Renderer/Bridge/` and regenerate.
 - Comments explain a decision that is not visible from the code (why a staging
   directory is a sibling of the library, why an rpath is deleted). `///` doc
   comments state a type's responsibility in one line. No commentary that restates
@@ -107,7 +117,10 @@ How the panel runs (controller, actions, observation, window hosting) is in
   property, a navigation), `.dropDuplicates` otherwise. A new action is an
   `async throws` method in `Model/PanelController+<Group>.swift` that picks its
   disposition with `run(_:slot:...)`; confirmations and file panels go through
-  `controller.dialogs`, never a direct `NSAlert` or `NSOpenPanel`.
+  `controller.dialogs`, never a direct `NSAlert` or `NSOpenPanel`. A row that draws
+  another kind of value like an existing one passes a scope instead of copying the
+  view: `PropertyRowView`'s `Scope` (`.authored` or `.engineOption(id)`) only picks
+  the typed actions and their key.
 - **Typed state only.** What a view shows is a typed computed property or a small
   value type with a `make(...)` factory on the controller or an area model, never a
   dictionary. A getter that reads a store which is not `@Observable` reads its
@@ -141,8 +154,41 @@ How the panel runs (controller, actions, observation, window hosting) is in
   Settings sections and the Quick Settings tiles draw a white filled symbol on a
   coloured rounded square (`SymbolTile`), as System Settings does. Never copy
   Apple's symbol artwork, or another icon set, into the repository.
+- **Play and Apply keep their own symbols.** `play.fill` is only Play (starting a
+  rotation) and resuming playback. Putting a wallpaper on a display (Apply wallpaper,
+  Download and apply, a tile's Apply item, the mark of an apply that waits) draws
+  `ApplyOffer.symbol`, and Reapply `ApplyOffer.reapplySymbol`; a download's pause,
+  cancel, resume and retry draw `DownloadRowAction.systemImage`, wherever the control
+  sits. Read these names instead of writing the symbol again.
 - **Colours** come from `\.panelTheme` (`AccentPalette`, `SurfacePalette`) or the
-  system's semantic colours; a view never hardcodes a colour value.
+  system's semantic colours; a view never hardcodes a colour value. A control that cannot be
+  used fades by `PanelTheme.disabledOpacity` (`.panelDisabledOpacity(isEnabled)`), never by an
+  amount of its own; the Steam Workshop tile's ring, which sits on a dimmed picture, is the one
+  named exception. Over a picture use `SurfacePalette`'s scrim, mark and control tokens; never
+  `.black`, `.white`, a named hue or the hierarchical `.secondary` and `.tertiary`, which ignore
+  the tone. `scripts/tests/test_panel_design_tokens.py` fails on a raw colour in a file not on its
+  allowlist, which only shrinks.
+- **Buttons** with words are `.panelPrimary` (the one accent action of a place),
+  `.panelSecondary` beside it, in the same `PrimaryButtonStyle.Size`, and `.panelLink` for an
+  action within a sentence's reach; a link sets no font, so it takes the text's around it (a
+  notice's, or `.panel(.callout)` with `.labelStyle(.panelLinkRow)` for the column of links under
+  an inspector's notes, in every inspector). An action link on its own in an inspector card
+  (Center, Check again, Delete…) is `.panelCardLink`, which sets `.panel(.label)` and a 20-point
+  click target. Something that removes or deletes is `Button(role: .destructive)`, which both
+  draw in the danger colour; never a flag of a style's own. A glyph button beside the accent
+  action (favorite, the more menu) is `InspectorIconButtonStyle`; one beside a quiet button
+  (Share, pixiv's Cancel) is `.panelSecondary` at that button's size, so the two share their fill
+  and hairline. The system `.bordered` and `.link` styles
+  ignore the panel's palettes; the few left outside the inspectors are a backlog, not a pattern.
+- **Type** comes from the roles of `PanelFont` (`Theme/PanelFont.swift`), named for what the text
+  is (`.title`, `.sectionHeader`, `.body`, `.callout`, `.caption`…): `.font(.panel(.body))`, or
+  `.panelFont(.eyebrow)` where the role also sets capitals and tracking. A size taken from a
+  control's geometry (a glyph in a disc) is `PanelFont.proportional(to:ratio:weight:)`, and
+  AppKit code that measures the panel's text reads the role's `nsFont` or `lineHeight`, so what
+  is measured is what is drawn. A new size that fits no role is a new role, not a literal.
+  `scripts/tests/test_panel_design_tokens.py` fails on a raw `.system(size:)`,
+  `systemFont(ofSize:)` or system text style in a file not on its allowlist; migrate a listed
+  file and delete its entry.
 - **Accessibility.** Every icon-only control has an accessibility label
   (`L("…")`); an error or a status change is announced; the keyboard paths stay
   (grid arrows, Home and End, Return and Space, the Escape chain, Command-F for the
@@ -155,7 +201,11 @@ How the panel runs (controller, actions, observation, window hosting) is in
   static text, not on a container, where it can swallow button clicks. The tabs,
   the toolbar, tiles and Settings are not selectable.
 - **No per-frame or idle work.** Anything that animates on its own reads
-  `\.panelIsVisible` and Reduce Motion and stops when either says so; no timer runs
+  `\.panelIsVisible` and Reduce Motion and stops when either says so. Work of unknown
+  length shows `ProgressRing(value: nil)` (or `LoadingRing`) or `ProgressBar(value: nil)`,
+  never a `ProgressView` without a `value:`, which keeps turning;
+  `scripts/tests/test_panel_progress_indicators.py` enforces this. A window outside the
+  panel that shows them sets `\.panelIsVisible` itself, as the update window does. No timer runs
   while the window is hidden; grids are lazy; nothing walks the library on a
   download tick. A grid tile builds only what it shows: a control hidden with
   `.opacity(0)` still costs its whole view tree in every tile, and scrolling builds
@@ -169,7 +219,10 @@ How the panel runs (controller, actions, observation, window hosting) is in
   `.fixedSize(horizontal: false, vertical: true)` on wrapping text there. Any
   minimum width beside the open inspector makes AppKit throw "needing another
   Update Constraints in Window pass" when the window shrinks to its floor; the
-  render tests that shrink the window catch it.
+  render tests that shrink the window catch it. A form whose controls line up beside
+  their labels sizes the labels with `ColumnLabel` (the widest label of the form in the
+  language on show), with `DisplaysRowLayout(keepsTextWidth:)` where the control may go
+  under its label, never with a fixed width that a longer translation wraps in.
 
 ## Python scripts
 
@@ -219,10 +272,12 @@ The rules that bind every change:
   Fixtures come from the test bundle or a temporary directory; probe output and
   snapshots go to `FileManager.default.temporaryDirectory`. Nothing a test does may
   reach the desktop either: opening an address, revealing in Finder, opening System
-  Settings and hiding the app go through `DesktopActions.current`, which the test
-  bundle's principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a
-  recorder before any test runs. New code that opens, reveals or hides uses it, never
-  `NSWorkspace.shared` or `NSApp.hide` directly.
+  Settings, hiding the app, and reading or changing Finder's desktop icons (which
+  restarts Finder) go through `DesktopActions.current`, which the test bundle's
+  principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a recorder
+  before any test runs. New code that opens, reveals or hides, or changes or restarts
+  Finder, uses it, never `NSWorkspace.shared`, `NSApp.hide`, or `CFPreferences` and
+  `kill` on Finder directly.
 - Panel tests build the controller with `PanelTestCase.makeController(...)` or
   `withPanel(...)` (temporary home, `TemporaryDefaults`, English, the welcome guide
   already seen) and call the typed actions. Render tests host a view in an unordered
@@ -240,6 +295,10 @@ The rules that bind every change:
 - Files under `docs/` are `lowercase-hyphenated.md`, with exactly one `#` H1.
   Product feature docs go in `docs/features/`, test documents in `docs/testing/`.
 - Adding or removing a document means updating [README.md](README.md), the index.
+- A relative link must reach its file, and its `#anchor` a heading of that page as GitHub
+  spells it (or an `<a id>`). Renaming a heading means updating the links to it:
+  `scripts/tests/test_doc_links.py` checks every Markdown page outside the archives in the
+  routine gate's Python stage, and `python3 scripts/tests/test_doc_links.py` runs it alone.
 - Ground every statement in the repository: real paths, real flags, real test
   names. Delete a claim you cannot confirm instead of softening it.
 - [testing/verification-log.md](testing/verification-log.md) is newest-entry
@@ -270,9 +329,13 @@ The rules that bind every change:
   `fix`, `perf` and breaking commits arrive with their body, `docs`, `test`,
   `chore`, `ci`, `build`, `style` and `refactor` with their subject only, as internal work to
   leave out. The subject and body are therefore what users end up reading on the
-  release page and in the app's What's new card, so write them for users. Without
+  release page and in the app's update window, so write them for users. Without
   `--ai` the same script lists the commits by type instead. See
   [release.md](release.md#release-notes-and-the-changelog).
+- A commit that resolves an issue says so in its body with one of GitHub's closing
+  keywords, `Closes #76` (or `Fixes #76`, `Resolves #76`): GitHub closes the issue
+  when it reaches `main`, and every changelog bullet built from that commit links the
+  issue as `(closes #76)`. Name only issues of this repository.
 - Pull request titles follow the same format. Squash-merging a PR with several
   commits makes its title the commit subject, so an untyped title such as
   `Discover fixes and new tabs` reaches the release notes without a type. When a squash body lists several
@@ -287,13 +350,21 @@ The rules that bind every change:
     does for you);
   - a bridge-crate interface change and the regenerated `App/Bridge/Generated`;
   - a behavior change and the documentation that describes that behavior;
-  - a new user-facing string and every shipped catalog;
-  - `README.md` and `README.zh-CN.md`;
-  - a vendored `upstream/` update and `upstream/provenance.json`.
+  - a new user-facing string and the catalog of each target that shows it, in
+    every language;
+  - `README.md`, `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md`;
+  - a vendored `ThirdParty/` update and `ThirdParty/provenance.json`.
 - History stays linear: catch up with `origin/main` by rebasing unpushed commits
   (`git pull --rebase`), not with a `Merge remote-tracking branch` commit. CI commits
   to `main` on its own (version bumps, the Supporter list), so a local `main`
-  falls behind often. Commits that are already pushed are never rewritten.
+  falls behind often. Commits that are already pushed are never rewritten. The one
+  merge commit on `main` brings a released hotfix branch back
+  (`chore: merge hotfix x.y.z into main`, see
+  [release.md](release.md#hotfix-releases)); a squash or rebase of that branch would
+  release its `release:` line again.
+- An urgent fix that must ship without the rest of `main` goes on a `hotfix/<x.y.z>`
+  branch cut from the newest release tag, not on `main`
+  ([release.md](release.md#hotfix-releases)).
 - Never commit `artifacts/`, `build/`, screenshots, traces, wallpaper payloads,
   Steam session data, credentials, or absolute personal paths.
 

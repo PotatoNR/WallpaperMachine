@@ -3,8 +3,9 @@ import Foundation
 /// The inspector's General configuration and Displays cards: the wallpaper's own audio and media
 /// settings, and what each display does with it.
 ///
-/// Every setting here takes effect at once and is saved, except the scale factor, which is a draft
-/// that shows on the display and waits for Apply changes. Each is queued behind the user's other
+/// Every setting here takes effect at once and is saved, except a display's scale factor, a draft
+/// that shows on the display, and its Enabled switch, a draft too: both wait for Apply changes (the
+/// bridge reports them as the display row's `staged`). Each is queued behind the user's other
 /// commands and wrapped by the store in an edit, so an Apply or an activation waits for it. Start
 /// them under the `InspectorAction.wallpaperSetting` / `displayConfig` keys with `.latestWins`.
 extension PanelController {

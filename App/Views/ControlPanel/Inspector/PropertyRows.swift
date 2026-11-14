@@ -25,7 +25,7 @@ struct PropertiesCards: View {
             } label: {
               Label("Restore all defaults", systemImage: "arrow.counterclockwise")
             }
-            .buttonStyle(.inspectorLink)
+            .buttonStyle(.panelCardLink)
             .disabled(!options.canRestoreAll)
             .help(
               L(
@@ -45,11 +45,21 @@ struct PropertiesCards: View {
 /// default and the control. A switch, a colour and a choice sit beside the label; a slider, text,
 /// picture, file and folder sit under it. Groups are headings and descriptions are text.
 struct PropertyRowView: View {
+  /// Whose value the row edits: an authored property, or one of Wallpaper Engine's per-wallpaper
+  /// options, which the same row draws with the same Modified mark and Restore default. The scope
+  /// only picks the actions and their key.
+  enum Scope: Equatable {
+    case authored
+    case engineOption(BridgeEngineOptionId)
+  }
+
   let options: InspectorOptions
   let row: InspectorOptions.PropertyRow
+  let scope: Scope
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  @Environment(\.inspectorEditedRow) private var editedRow
   @State private var isHovering = false
   @FocusState private var restoreFocused: Bool
   @State private var drag = DriverBox<PumpedDrag<PropertyDragValue>>()
@@ -57,8 +67,19 @@ struct PropertyRowView: View {
   @State private var liveColor: Color?
   @FocusState private var textFocused: Bool
 
+  init(options: InspectorOptions, row: InspectorOptions.PropertyRow, scope: Scope = .authored) {
+    self.options = options
+    self.row = row
+    self.scope = scope
+  }
+
   private var id: String { options.wallpaperID }
-  private var propertyKey: String { InspectorAction.property(id, row.id) }
+  private var propertyKey: String {
+    switch scope {
+    case .authored: InspectorAction.property(id, row.id)
+    case .engineOption(let option): InspectorAction.engineOption(id, option)
+    }
+  }
 
   var body: some View {
     switch row.control {
@@ -79,6 +100,8 @@ struct PropertyRowView: View {
           colorDriver.driver?.finish()
           drag.driver?.settle()
         }
+        // What the footer scrolls clear of itself when this row's edit brings it in.
+        .id(propertyKey)
     }
   }
 
@@ -157,7 +180,11 @@ struct PropertyRowView: View {
           "",
           text: Binding(
             get: { text },
-            set: { controller.setPropertyText($0, property: row.id, in: id) })
+            set: {
+              // Text typed and not yet sent waits too: its first key can bring the footer in.
+              editedRow?.note(propertyKey)
+              controller.setPropertyText($0, property: row.id, in: id)
+            })
         )
         .textFieldStyle(.roundedBorder)
         .controlSize(.small)
@@ -181,10 +208,10 @@ struct PropertyRowView: View {
           } label: {
             Label("Choose image", systemImage: "folder")
           }
-          .buttonStyle(.inspectorSecondary)
+          .buttonStyle(.panelSecondary(size: .compact))
           if !path.isEmpty {
             Button("Clear") { commit(.string(value: "")) }
-              .buttonStyle(.inspectorSecondary)
+              .buttonStyle(.panelSecondary(size: .compact))
           }
         }
         .disabled(isDisabled)
@@ -213,7 +240,10 @@ struct PropertyRowView: View {
     control: Bool = false, @ViewBuilder trailing: () -> Trailing
   ) -> some View {
     if control {
-      PropertyTopLineLayout(reserve: row.isModified ? 0 : ModifiedMark.width()) {
+      PropertyTopLineLayout(
+        reserve: ModifiedMark.reserve(
+          for: row.mark, followedBy: row.canRestoreDefault ? Self.marksSpacing : 0)
+      ) {
         PropertyNameView(row: row)
           .layoutValue(key: PropertyTopLineLayout.PartKey.self, value: .label)
         marks
@@ -231,15 +261,16 @@ struct PropertyRowView: View {
     }
   }
 
-  /// The Modified mark and Restore default.
+  /// The gap between the mark and Restore default.
+  private static let marksSpacing: CGFloat = 8
+
+  /// The Modified or Not applied mark and Restore default.
   private var marks: some View {
-    HStack(alignment: .center, spacing: 8) {
-      if row.isModified { ModifiedMark() }
+    HStack(alignment: .center, spacing: Self.marksSpacing) {
+      if let mark = row.mark { ModifiedMark(kind: mark) }
       if row.canRestoreDefault {
         Button {
-          controller.launch(InspectorAction.restoreProperty(id, row.id)) {
-            try await controller.restoreProperty(id, property: row.id)
-          }
+          restoreDefault()
         } label: {
           Image(systemName: "arrow.counterclockwise")
         }
@@ -256,8 +287,30 @@ struct PropertyRowView: View {
   // MARK: Committing
 
   private func commit(_ value: BridgePropertyValue) {
-    controller.launch(propertyKey, policy: .latestWins) {
-      try await controller.commitProperty(id, property: row.id, value: value)
+    editedRow?.note(propertyKey)
+    switch scope {
+    case .authored:
+      controller.launch(propertyKey, policy: .latestWins) {
+        try await controller.commitProperty(id, property: row.id, value: value)
+      }
+    case .engineOption(let option):
+      controller.launch(propertyKey, policy: .latestWins) {
+        try await controller.commitEngineOption(id, option: option, value: value)
+      }
+    }
+  }
+
+  private func restoreDefault() {
+    editedRow?.note(propertyKey)
+    switch scope {
+    case .authored:
+      controller.launch(InspectorAction.restoreProperty(id, row.id)) {
+        try await controller.restoreProperty(id, property: row.id)
+      }
+    case .engineOption(let option):
+      controller.launch(InspectorAction.restoreEngineOption(id, option)) {
+        try await controller.restoreEngineOption(id, option: option)
+      }
     }
   }
 
@@ -283,7 +336,7 @@ struct PropertyRowView: View {
     ) { output in
       topLine {
         Text(verbatim: output)
-          .font(.system(size: 12).monospacedDigit())
+          .font(.panel(.callout).monospacedDigit())
           .foregroundStyle(theme.surface.muted.color)
           .accessibilityHidden(true)
       }
@@ -294,8 +347,13 @@ struct PropertyRowView: View {
   /// The driver of this slider's drags: a pump of its own for each drag, the property's key.
   private func sliderDrag() -> PumpedDrag<PropertyDragValue> {
     if let driver = drag.driver { return driver }
-    let driver = PumpedDrag<PropertyDragValue>.property(
-      controller: controller, wallpaperID: id, property: row.id)
+    let driver: PumpedDrag<PropertyDragValue>
+    switch scope {
+    case .authored:
+      driver = .property(controller: controller, wallpaperID: id, property: row.id)
+    case .engineOption(let option):
+      driver = .engineOption(controller: controller, wallpaperID: id, option: option)
+    }
     drag.driver = driver
     return driver
   }
@@ -331,10 +389,10 @@ private struct PropertyNameView: View {
   var body: some View {
     let document = InspectorPolicy.labelDocument(for: row)
     if row.label.markup != nil, !document.isEmpty {
-      PropertyLabelView(document: document, baseSize: 13)
+      PropertyLabelView(document: document, role: .body)
     } else {
       Text(verbatim: row.name)
-        .font(.system(size: 13))
+        .font(.panel(.body))
         .foregroundStyle(theme.surface.text.color)
         .frame(maxWidth: .infinity, alignment: .leading)
         .textSelection(.enabled)
@@ -347,9 +405,7 @@ private struct PropertyHeadingView: View {
   let row: InspectorOptions.PropertyRow
 
   var body: some View {
-    PropertyLabelView(
-      document: InspectorPolicy.labelDocument(for: row), baseSize: 12.5, baseWeight: .semibold
-    )
+    PropertyLabelView(document: InspectorPolicy.labelDocument(for: row), role: .sectionHeader)
     .padding(.horizontal, 12)
     .padding(.top, 12)
     .padding(.bottom, 6)
@@ -368,11 +424,11 @@ private struct PropertyDescriptionView: View {
     VStack(alignment: .leading, spacing: 4) {
       let document = InspectorPolicy.labelDocument(for: row)
       if !document.isEmpty {
-        PropertyLabelView(document: document, baseSize: 12, color: theme.surface.muted.color)
+        PropertyLabelView(document: document, role: .callout, color: theme.surface.muted.color)
       }
       if let detail {
         Text(verbatim: detail)
-          .font(.system(size: 12))
+          .font(.panel(.callout))
           .foregroundStyle(theme.surface.muted.color)
           .frame(maxWidth: .infinity, alignment: .leading)
           .textSelection(.enabled)
@@ -398,7 +454,7 @@ struct PathValueField: View {
 
   var body: some View {
     Text(verbatim: text)
-      .font(.system(size: 12))
+      .font(.panel(.callout))
       .foregroundStyle(isPlaceholder ? theme.surface.faint.color : theme.surface.text.color)
       .lineLimit(1)
       .truncationMode(.middle)
@@ -449,12 +505,12 @@ private struct AssetValueView<Header: View>: View {
             Label("Choose…", systemImage: "folder")
           }
         }
-        .buttonStyle(.inspectorSecondary)
+        .buttonStyle(.panelSecondary(size: .compact))
         .help(isFolder ? L("Choose a folder for \(row.name)") : L("Choose a file for \(row.name)"))
         Button("Clear") {
           controller.launch(key) { try await controller.clearAssetPath(id, property: row.id) }
         }
-        .buttonStyle(.inspectorSecondary)
+        .buttonStyle(.panelSecondary(size: .compact))
         .disabled(!state.isChosen)
         .help(L("Clear \(row.name)"))
       }

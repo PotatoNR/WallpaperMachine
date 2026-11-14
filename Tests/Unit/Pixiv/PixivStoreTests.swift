@@ -52,7 +52,7 @@ final class PixivStoreTests: XCTestCase {
     }
 
     /// A daily ranking of `total` works whose page `p` holds three: one wide, one tall, one suggestive.
-    private nonisolated static func ranking(_ url: URL, total: Int = 150) -> Data {
+    private nonisolated static func ranking(_ url: URL, total: Int = 50) -> Data {
         let page = Int(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
             .first { $0.name == "p" }?.value ?? "1") ?? 1
         let base = page * 10
@@ -75,8 +75,8 @@ final class PixivStoreTests: XCTestCase {
         XCTAssertEqual(store.works.map(\.id), ["11", "12"])
         XCTAssertEqual(store.hiddenCount, 1)
         XCTAssertEqual(store.page, 1)
-        XCTAssertEqual(store.totalPages, 3)
-        XCTAssertEqual(store.totalCount, 150)
+        XCTAssertEqual(store.totalPages, 1)
+        XCTAssertEqual(store.totalCount, 2)
         XCTAssertEqual(store.committedQuery, PixivQuery())
     }
 
@@ -141,19 +141,25 @@ final class PixivStoreTests: XCTestCase {
     }
 
     func testPagingBackIsServedFromTheCacheAndTheNextPageIsPrefetched() async throws {
-        let transport = PixivFixtureTransport { Self.ranking($0) }
+        let transport = PixivFixtureTransport { url in
+            let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "p" }?.value.flatMap(Int.init) ?? 1
+            return PixivFixtures.search(
+                (1...60).map { PixivFixtures.searchEntry(Work(id: (page - 1) * 60 + $0)) },
+                total: 180, lastPage: 3)
+        }
         let store = store(transport)
         store.prefetchesNextPage = true
-        store.apply(PixivQuery())
-        try await waitUntil { store.hasLoaded && transport.requests.count == 2 }
+        store.apply(PixivQuery(text: "sky"))
+        try await waitUntil { store.hasLoaded && transport.requests.count == 3 }
 
         store.loadPage(2)
         try await waitUntil { store.page == 2 && !store.isLoading }
-        XCTAssertEqual(store.works.first?.id, "21")
+        XCTAssertEqual(store.works.first?.id, "61")
         try await waitUntil { transport.requests.count == 3 }
         store.loadPage(1)
         XCTAssertFalse(store.isLoading, "a page seen before shows at once")
-        XCTAssertEqual(store.works.first?.id, "11")
+        XCTAssertEqual(store.works.first?.id, "1")
         store.loadPage(4)
         XCTAssertEqual(store.page, 1, "pages past the ranking's end are not offered")
 
@@ -187,8 +193,8 @@ final class PixivStoreTests: XCTestCase {
         try await waitUntil { store.hasLoaded }
         XCTAssertNil(store.errorMessage)
         XCTAssertEqual(store.works.map(\.id), ["6"], "AI-generated works stay hidden when asked")
-        XCTAssertEqual(store.totalPages, 10)
-        XCTAssertEqual(store.totalCount, 600)
+        XCTAssertEqual(store.totalPages, 1)
+        XCTAssertEqual(store.totalCount, 1)
         XCTAssertEqual(transport.requests.last?.path, "/ajax/search/illustrations/sky")
     }
 
@@ -202,14 +208,14 @@ final class PixivStoreTests: XCTestCase {
         store.onThumbnailsAvailable = { announced += $0 }
         store.apply(PixivQuery())
         try await waitUntil { store.hasLoaded }
-        XCTAssertEqual(announced.count, 3, "every thumbnail on the page, filtered or not")
+        XCTAssertEqual(announced.count, 2, "only displayed matching thumbnails")
 
         let first = try XCTUnwrap(store.work(id: "11"))
         store.select(first)
         XCTAssertNil(store.selectedPages)
         try await waitUntil { store.selectedPages != nil }
         XCTAssertEqual(store.selectedPageList?.count, 4)
-        XCTAssertEqual(announced.count, 7, "the pages' previews are announced too")
+        XCTAssertEqual(announced.count, 6, "the pages' previews are announced too")
 
         store.selectPage(3)
         XCTAssertEqual(store.selectedPage, 3)
@@ -226,8 +232,14 @@ final class PixivStoreTests: XCTestCase {
 
     func testADownloadedWorkStaysReachableAfterPagingAway() async throws {
         let transport = PixivFixtureTransport { url in
-            url.path.hasSuffix("/pages") ? PixivFixtures.pages(workID: 11, count: 1)
-                : url.host == "i.pximg.net" ? PixivFixtures.imageBytes("jpg") : Self.ranking(url)
+            if url.path.hasSuffix("/pages") { return PixivFixtures.pages(workID: 11, count: 1) }
+            if url.host == "i.pximg.net" { return PixivFixtures.imageBytes("jpg") }
+            let page = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "p" }?.value.flatMap(Int.init) ?? 1
+            return PixivFixtures.ranking(
+                (1...50).map {
+                    PixivFixtures.rankingEntry(Work(id: (page - 1) * 50 + $0 + 10), rank: $0)
+                }, page: page, total: 100)
         }
         let store = store(transport)
         store.apply(PixivQuery())
@@ -331,6 +343,20 @@ final class PixivStoreTests: XCTestCase {
         XCTAssertEqual(store.works.map(\.rating), [.mature, .mature, .mature])
     }
 
+    func testALogOutTheKeychainRefusesKeepsTheSignIn() async throws {
+        let sessions = PixivMemorySessionStore()
+        let store = store(Self.member(), sessions: sessions)
+        store.signIn { PixivFixtures.session }
+        try await waitUntil { store.account != nil }
+        sessions.keepsOnRemove = true
+
+        XCTAssertThrowsError(try store.signOut())
+
+        XCTAssertTrue(store.isSignedIn, "the session the next launch would restore is still there")
+        XCTAssertNotNil(store.account)
+        XCTAssertEqual(sessions.session, PixivFixtures.session)
+    }
+
     func testLoggingOutForgetsTheSessionAndEverythingR18() async throws {
         let transport = Self.member()
         let sessions = PixivMemorySessionStore()
@@ -343,17 +369,19 @@ final class PixivStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedWork?.rating, .mature)
         XCTAssertEqual(store.works.count, 3)
 
-        store.signOut()
+        try store.signOut()
 
         XCTAssertFalse(store.isSignedIn)
         XCTAssertNil(store.account)
         XCTAssertNil(sessions.session)
         XCTAssertNil(store.selectedWork, "an R-18 work does not stay on show")
         XCTAssertTrue(store.works.isEmpty, "R-18 tiles leave at once, before the reload answers")
-        XCTAssertEqual(store.hiddenCount, 3)
+        XCTAssertEqual(store.totalCount, 0)
         XCTAssertEqual(store.query.ranking, .weekly)
         XCTAssertEqual(store.query.ratings, [])
         try await waitUntil { store.committedQuery?.ranking == .weekly && !store.isLoading }
+        store.apply(PixivQuery(ranking: .weekly))
+        try await waitUntil { !store.isLoading }
         XCTAssertEqual(mode(of: transport.requests.last), "weekly")
         XCTAssertNil(transport.sessions.last ?? nil)
     }

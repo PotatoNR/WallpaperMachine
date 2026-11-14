@@ -13,6 +13,23 @@ struct WebSignInSite: Sendable {
     var companionDomains: Set<String> = []
     /// Whether a cookie value is a real session rather than a placeholder the page sets early.
     let accepts: @Sendable (String) -> Bool
+    /// The hosts the page itself may be, after a link, a redirect or a popup alike; nil lets it
+    /// be any HTTPS site, as pixiv's sign-in with Google, Apple and other providers needs.
+    var pageHosts: Set<String>?
+
+    /// Whether the window may load `url`, as the page itself (`inPage`) or in a frame inside it.
+    /// Only HTTPS loads, or a blank page. The window shows no address and carries the site's name,
+    /// so the page stays on `pageHosts`, at the standard port and without a user name in the
+    /// address, where nothing else can stand in for the site's own sign-in form. A frame may be
+    /// any HTTPS site: the page embeds third-party challenges such as reCAPTCHA.
+    func allows(_ url: URL?, inPage: Bool) -> Bool {
+        guard let url, let scheme = url.scheme?.lowercased() else { return false }
+        if scheme == "about" { return !inPage || url.absoluteString.lowercased() == "about:blank" }
+        guard scheme == "https" else { return false }
+        guard inPage, let pageHosts else { return true }
+        guard let host = url.host?.lowercased(), pageHosts.contains(host) else { return false }
+        return url.user == nil && url.password == nil && (url.port ?? 443) == 443
+    }
 
     static var pixiv: WebSignInSite {
         WebSignInSite(
@@ -29,15 +46,10 @@ struct WebSignInSite: Sendable {
             signInURL: URL(string: "https://steamcommunity.com/login/home/?goto=")!,
             cookieName: "steamLoginSecure", cookieDomains: ["steamcommunity.com", ".steamcommunity.com"],
             companionName: "steamRefresh_steam", companionDomains: ["login.steampowered.com"],
-            accepts: { SteamWebSession(cookie: $0) != nil })
+            accepts: { SteamWebSession(cookie: $0) != nil },
+            // The sign-in, its renewal host, and the help and sign-up pages its links open.
+            pageHosts: ["steamcommunity.com", "login.steampowered.com", "help.steampowered.com", "store.steampowered.com"])
     }
-}
-
-/// What a sign-in window took from the page: the session cookie, and the site's companion cookie
-/// when it has one and the page set it.
-struct WebSignInCookies: Equatable, Sendable {
-    let session: String
-    var companion: String?
 }
 
 /// A site's own sign-in page in a window of its own. The page runs in a private website data
@@ -62,6 +74,8 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
 
     private let site: WebSignInSite
     private let webView: WKWebView
+    /// Covers the blank page when the sign-in page could not load, with why and a way to retry.
+    private let failureView = WebSignInFailureView(frame: .zero)
     private var continuation: CheckedContinuation<WebSignInCookies?, Never>?
 
     /// The session cookie alone, for a site without a companion.
@@ -106,14 +120,28 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
         window.title = site.title
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 380, height: 520)
-        window.contentView = webView
+        let content = NSView(frame: NSRect(origin: .zero, size: size))
+        for view in [webView, failureView] {
+            view.frame = content.bounds
+            view.autoresizingMask = [.width, .height]
+            content.addSubview(view)
+        }
+        failureView.isHidden = true
+        window.contentView = content
         ControlPanelWindow.moveToActiveSpace(window)
         window.center()
         super.init(window: window)
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        failureView.retry = { [weak self] in self?.retry() }
         configuration.websiteDataStore.httpCookieStore.add(self)
+    }
+
+    /// Starts the site's sign-in page again, from its first address.
+    private func retry() {
+        failureView.isHidden = true
+        webView.load(URLRequest(url: site.signInURL))
     }
 
     @available(*, unavailable)
@@ -154,25 +182,33 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
         finish(nil)
     }
 
-    // Anything but HTTPS (an app link, a mail address) goes nowhere; the window is for signing in.
+    // Anything the site does not allow (an app link, a mail address, another site) goes nowhere;
+    // the window is for signing in. A new window has no target frame and would replace the page.
     func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction
     ) async -> WKNavigationActionPolicy {
-        let scheme = navigationAction.request.url?.scheme?.lowercased()
-        return scheme == "https" || scheme == "about" ? .allow : .cancel
+        let inPage = navigationAction.targetFrame?.isMainFrame ?? true
+        return site.allows(navigationAction.request.url, inPage: inPage) ? .allow : .cancel
     }
 
-    // A page that opens a window of its own continues in this one instead.
+    // Checked again where a redirect ends, so a link to an allowed host cannot land elsewhere.
+    func webView(
+        _ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse
+    ) async -> WKNavigationResponsePolicy {
+        site.allows(navigationResponse.response.url, inPage: navigationResponse.isForMainFrame) ? .allow : .cancel
+    }
+
+    // A page that opens a window of its own continues in this one instead, where it may go.
     func webView(
         _ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if navigationAction.request.url?.scheme?.lowercased() == "https" { webView.load(navigationAction.request) }
+        if site.allows(navigationAction.request.url, inPage: true) { webView.load(navigationAction.request) }
         return nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        window?.subtitle = ""
+        failureView.isHidden = true
         Task { await lookForSession() }
     }
 
@@ -187,10 +223,79 @@ final class WebSignInWindowController: NSWindowController, NSWindowDelegate, WKN
     }
 
     /// A load the page itself replaced, or one refused above, is not a failure worth showing.
+    /// Anything else covers the page, which WebKit leaves blank, with the reason and a retry.
     private func showFailure(_ error: Error) {
-        let error = error as NSError
-        if error.domain == NSURLErrorDomain, error.code == NSURLErrorCancelled { return }
-        if error.domain == "WebKitErrorDomain", error.code == 102 { return }
-        window?.subtitle = error.localizedDescription
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+        if nsError.domain == "WebKitErrorDomain", nsError.code == 102 { return }
+        failureView.message = ConnectionInterrupted.message(for: error, site: site.signInURL.host ?? site.title)
+        failureView.isHidden = false
     }
+}
+
+/// What a sign-in window shows in place of a page that did not load: a heading, the reason and
+/// **Retry**.
+@MainActor
+private final class WebSignInFailureView: NSView {
+    var retry: (() -> Void)?
+
+    var message: String {
+        get { detail.stringValue }
+        set { detail.stringValue = newValue }
+    }
+
+    private let detail = NSTextField(wrappingLabelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+
+        let symbol = NSImageView(
+            image: NSImage(systemSymbolName: "wifi.exclamationmark", accessibilityDescription: nil) ?? NSImage())
+        symbol.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 32, weight: .regular)
+        symbol.contentTintColor = .secondaryLabelColor
+
+        let heading = NSTextField(labelWithString: String(localized: "Couldn’t open the sign-in page"))
+        heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize + 2)
+        heading.alignment = .center
+
+        detail.alignment = .center
+        detail.textColor = .secondaryLabelColor
+        detail.isSelectable = true
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let button = NSButton(title: String(localized: "Retry"), target: self, action: #selector(retryPressed))
+        button.bezelStyle = .push
+
+        let stack = NSStackView(views: [symbol, heading, detail, button])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.setCustomSpacing(20, after: detail)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        // The reason wraps at 360 points, or narrower when the window is.
+        let preferredWidth = detail.widthAnchor.constraint(equalToConstant: 360)
+        preferredWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -32),
+            preferredWidth,
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    // The page behind is hidden only by this view, so it paints the window's background,
+    // resolved again whenever the appearance changes.
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
+
+    @objc private func retryPressed() { retry?() }
 }

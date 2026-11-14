@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// One icon button of the Now Playing bar: previous, play or pause, next, Recently used.
+/// One icon button of the Now Playing bar: previous, play or pause, next, random, the playlist,
+/// Recently used.
 ///
 /// Its label is both the tooltip and what VoiceOver reads, so a button never says one thing and does
 /// another; the play button's label changes with what pressing it does.
@@ -10,16 +11,21 @@ struct NowPlayingControl: View {
   var isEnabled = true
   /// The play or pause button is the bar's main action and draws a little larger.
   var isProminent = false
+  /// The symbol's colour while the button stands for something switched on; the text colour
+  /// otherwise.
+  var tint: Color?
   let identifier: String
   let action: () -> Void
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.panelTheme) private var theme
 
   var body: some View {
     Button(action: action) {
       Image(systemName: systemImage)
         .font(.system(size: isProminent ? 15 : 12.5, weight: .semibold))
         .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+        .foregroundStyle(tint ?? theme.surface.text.color)
     }
     .buttonStyle(NowPlayingControlStyle())
     .disabled(!isEnabled)
@@ -49,7 +55,7 @@ private struct NowPlayingControlBody: View {
       .foregroundStyle(theme.surface.text.color)
       .frame(maxWidth: .infinity, minHeight: 28)
       .background(fill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-      .opacity(isEnabled ? 1 : 0.32)
+      .panelDisabledOpacity(isEnabled)
       .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
       .onHover { isHovering = $0 }
   }

@@ -1,4 +1,5 @@
 import Observation
+import SwiftUI
 import XCTest
 
 @testable import WallpaperMachine
@@ -31,13 +32,13 @@ final class PanelLocaleTests: XCTestCase {
   func testEveryShippedLanguageResolvesMigratedPhrasesFromItsOwnBundle() {
     for language in AppLanguage.supported {
       let locale = panel(language.tag)
-      let phrase = locale.string("Follow desktop Space")
+      let phrase = locale.string("Different wallpaper for each desktop")
       let runtime = locale.catalogString("Steam password")
       if language.tag == "en" {
-        XCTAssertEqual(phrase, "Follow desktop Space")
+        XCTAssertEqual(phrase, "Different wallpaper for each desktop")
         XCTAssertEqual(runtime, "Steam password")
       } else {
-        XCTAssertNotEqual(phrase, "Follow desktop Space", language.tag)
+        XCTAssertNotEqual(phrase, "Different wallpaper for each desktop", language.tag)
         XCTAssertNotEqual(runtime, "Steam password", language.tag)
         XCTAssertFalse(phrase.isEmpty, language.tag)
       }
@@ -122,10 +123,47 @@ final class PanelLocaleTests: XCTestCase {
     XCTAssertEqual(panel("en").catalogString("No action"), "No action")
   }
 
+  /// Records the locale a view is rendered with.
+  private final class SeenLocale { var locale: Locale? }
+  private struct LocaleProbe: View {
+    let seen: SeenLocale
+    @Environment(\.locale) private var locale
+    var body: some View {
+      seen.locale = locale
+      return Text(verbatim: locale.identifier)
+    }
+  }
+
+  /// A sheet or popover opens in its own window, which carries the launch language rather than
+  /// the root's locale: the presentation modifier hands its content the panel's language, and
+  /// follows a language chosen while it is on screen.
+  func testPresentedContentFollowsThePanelLanguageRatherThanItsWindows() async throws {
+    addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
+    let source = try store("ja")
+    PanelLocale.shared.bind(to: source)
+    let seen = SeenLocale()
+    let hosting = NSHostingView(
+      rootView: LocaleProbe(seen: seen).panelPresentationLocale()
+        .environment(\.locale, Locale(identifier: "en_US")))
+    hosting.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+    hosting.layoutSubtreeIfNeeded()
+    XCTAssertEqual(seen.locale?.language.languageCode?.identifier, "ja")
+
+    try source.set("pt-BR")
+    for _ in 0..<50 where seen.locale?.language.languageCode?.identifier != "pt" {
+      try await Task.sleep(for: .milliseconds(20))
+      hosting.layoutSubtreeIfNeeded()
+    }
+    XCTAssertEqual(seen.locale?.language.languageCode?.identifier, "pt")
+  }
+
   func testLocaleKeepsTheLanguageAndTheSystemRegion() {
     let japanese = PanelLocale(language: AppLanguage.named("ja")!, region: "CN").locale
     XCTAssertEqual(japanese.language.languageCode?.identifier, "ja")
     XCTAssertEqual(japanese.region?.identifier, "CN")
+    let korean = PanelLocale(language: AppLanguage.named("ko")!, region: "US").locale
+    XCTAssertEqual(korean.language.languageCode?.identifier, "ko")
+    XCTAssertEqual(korean.region?.identifier, "US")
     let traditional = PanelLocale(language: AppLanguage.named("zh-Hant")!, region: "US").locale
     XCTAssertEqual(traditional.language.script?.identifier, "Hant")
     XCTAssertEqual(traditional.region?.identifier, "US")
@@ -135,10 +173,10 @@ final class PanelLocaleTests: XCTestCase {
   }
 
   func testBoundStoreDrivesTheLanguageIncludingTheSystemChoice() throws {
-    let source = try store(system: ["ja-JP"])
+    let source = try store(system: ["ko-KR"])
     let locale = PanelLocale(region: nil)
     locale.bind(to: source)
-    XCTAssertEqual(locale.tag, "ja", "System follows the macOS language list")
+    XCTAssertEqual(locale.tag, "ko", "System follows the macOS language list")
 
     try source.set("zh-Hant")
     XCTAssertEqual(locale.tag, "zh-Hant")
@@ -146,9 +184,9 @@ final class PanelLocaleTests: XCTestCase {
     XCTAssertEqual(locale.locale.language.script?.identifier, "Hant")
 
     try source.set("en")
-    XCTAssertEqual(locale.string("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertEqual(locale.string("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     try source.set(AppLanguageStore.systemChoice)
-    XCTAssertEqual(locale.tag, "ja")
+    XCTAssertEqual(locale.tag, "ko")
 
     let other = try store("zh-Hans")
     locale.bind(to: other)
@@ -161,19 +199,19 @@ final class PanelLocaleTests: XCTestCase {
     addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
     let source = try store("en")
     PanelLocale.shared.bind(to: source)
-    XCTAssertEqual(L("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertEqual(L("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     let english = L("\(5) wallpapers")
 
     let fired = Counter()
     withObservationTracking {
-      _ = L("Follow desktop Space")
+      _ = L("Different wallpaper for each desktop")
     } onChange: {
       fired.increment()
     }
     XCTAssertEqual(fired.value, 0)
     try source.set("ja")
     XCTAssertEqual(fired.value, 1, "A body that called L() must be invalidated by a language change")
-    XCTAssertNotEqual(L("Follow desktop Space"), "Follow desktop Space")
+    XCTAssertNotEqual(L("Different wallpaper for each desktop"), "Different wallpaper for each desktop")
     XCTAssertNotEqual(L("\(5) wallpapers"), english)
 
     try source.set("en")

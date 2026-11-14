@@ -10,6 +10,8 @@ enum ShellPopover: Hashable, Sendable {
   case history
   /// Now Playing's details: what the bar names, at a size that has room for it.
   case nowPlaying
+  /// Now Playing's playlist: what the target display rotates through, and Change now and Stop.
+  case playlist
   /// The downloads button's list.
   case downloads
 }
@@ -121,6 +123,13 @@ final class ShellModel {
 
   /// Whether the Filters sidebar is on show: open, on a page that has filters.
   var areFiltersShown: Bool { hasFilters && isFiltersChoice }
+
+  /// Whether View › Show/Hide Wallpaper Details is offered: the page on show has the column and
+  /// the guide is closed. Settings has no inspector, and the guide covers it while the toolbar that
+  /// holds its button is hidden.
+  var canToggleInspector: Bool { hasInspector && !isWelcomeOpen }
+  /// Whether View › Show/Hide Filters is offered, by the same rule as `canToggleInspector`.
+  var canToggleFilters: Bool { hasFilters && !isWelcomeOpen }
 
   /// Whether the inspector is open on the pages that have one. Without a choice of the person's it
   /// follows the window: open when there is room, closed in a narrow window. A choice made in a
@@ -234,6 +243,15 @@ final class ShellModel {
     }
   }
 
+  @discardableResult
+  func randomWallpaper() -> Task<Void, Never> {
+    let controller = controller
+    let display = controller.targetDisplayID
+    return controller.launch(PanelActionCoordinator.key("randomWallpaper", displayID: display)) {
+      try await controller.randomWallpaper(displayID: display)
+    }
+  }
+
   /// Whether each of those is in flight, which disables its own button and no other.
   var isPlaybackBusy: Bool { controller.isBusy(PanelActionCoordinator.key("playback")) }
   var isPreviousBusy: Bool {
@@ -243,6 +261,10 @@ final class ShellModel {
   var isNextBusy: Bool {
     controller.isBusy(
       PanelActionCoordinator.key("nextWallpaper", displayID: controller.targetDisplayID))
+  }
+  var isRandomBusy: Bool {
+    controller.isBusy(
+      PanelActionCoordinator.key("randomWallpaper", displayID: controller.targetDisplayID))
   }
 
   /// Show in library: opens Installed with the wallpaper selected.
@@ -345,11 +367,17 @@ final class ShellModel {
 
   // MARK: Keyboard
 
-  /// Escape, for what the shell owns. An open name field of the Collections section is cancelled
+  /// Escape, for what the shell owns. The welcome guide covers everything, so while it is open
+  /// Escape is its **Skip setup**, and is used up even where that does nothing (the Start page, a
+  /// choice being committed). Otherwise an open name field of the Collections section is cancelled
   /// first, then an open popover; a selection (the library's) is left to the library page. True when
   /// the shell used the key.
   @discardableResult
   func handleEscape() -> Bool {
+    if isWelcomeOpen {
+      controller.welcome.skipSetup()
+      return true
+    }
     if collectionEditor.isOpen {
       collectionEditor.cancel()
       return true

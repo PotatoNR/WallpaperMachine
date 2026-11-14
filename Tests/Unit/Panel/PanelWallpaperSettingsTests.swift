@@ -46,7 +46,7 @@ final class PanelWallpaperSettingsTests: PanelTestCase {
       try await controller.setVolume(0.4, for: "wp")
       try await controller.setMuted(true, for: "wp")
       try await controller.setAudioResponseEnabled(false, for: "wp")
-      try await controller.setMediaIntegrationEnabled(true, for: "wp")
+      try await controller.setMediaIntegrationEnabled(false, for: "wp")
       try await controller.setDisplayEnabled(false, on: "primary", for: "wp")
       try await controller.setScalingMode(.match, on: "primary", for: "wp")
       try await controller.setScalingFactor(1.5, on: "primary", for: "wp")
@@ -55,7 +55,7 @@ final class PanelWallpaperSettingsTests: PanelTestCase {
       XCTAssertEqual(
         bridge.calls,
         [
-          "volume wp 0.4", "muted wp true", "audioResponse wp false", "mediaIntegration wp true",
+          "volume wp 0.4", "muted wp true", "audioResponse wp false", "mediaIntegration wp false",
           "enabled wp primary false", "scalingMode wp primary match", "scalingFactor wp primary 1.5",
           "fps wp primary 24",
         ])
@@ -63,7 +63,7 @@ final class PanelWallpaperSettingsTests: PanelTestCase {
       XCTAssertEqual(options.volume, Double(Float(0.4)))
       XCTAssertTrue(options.isMuted)
       XCTAssertFalse(options.audioResponseEnabled)
-      XCTAssertTrue(options.mediaIntegrationEnabled)
+      XCTAssertFalse(options.mediaIntegrationEnabled)
       let display = try XCTUnwrap(options.displays.first)
       XCTAssertFalse(display.isEnabled)
       XCTAssertEqual(display.scalingMode, .match)
@@ -71,6 +71,22 @@ final class PanelWallpaperSettingsTests: PanelTestCase {
       XCTAssertEqual(display.frameRate, 24)
       XCTAssertTrue(options.isDirty, "the scale factor is a draft that waits for Apply changes")
       XCTAssertTrue(options.canApply)
+    }
+  }
+
+  func testFitWithBlurredBackdropIsKeptForTheOneDisplayItWasChosenFor() async throws {
+    try await withSettings { panel, bridge in
+      let controller = panel.controller
+      try await controller.setScalingMode(.matchBlurred, on: "slow", for: "wp")
+
+      XCTAssertEqual(bridge.calls, ["scalingMode wp slow matchBlurred"])
+      let options = try XCTUnwrap(controller.inspectorOptions(for: "wp"))
+      XCTAssertEqual(options.displays.map(\.scalingMode), [.fill, .matchBlurred])
+      XCTAssertFalse(options.isDirty, "a scaling mode is saved at once, not drafted")
+      for display in options.displays {
+        XCTAssertTrue(InspectorPolicy.offersBlurredFit(options, display: display))
+        XCTAssertEqual(InspectorPolicy.blurredFitNote(for: display), .none)
+      }
     }
   }
 
@@ -273,6 +289,7 @@ extension BridgeScalingMode {
     case .stretch: "stretch"
     case .match: "match"
     case .fill: "fill"
+    case .matchBlurred: "matchBlurred"
     }
   }
 }

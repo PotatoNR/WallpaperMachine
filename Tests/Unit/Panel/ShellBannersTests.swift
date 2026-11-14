@@ -101,6 +101,27 @@ final class ShellBannersTests: PanelTestCase {
       XCTAssertGreaterThan(narrow, wide, "a narrow column wraps the reason onto more lines")
     }
   }
+
+  func testTheErrorLinesDismissIsASquareBigEnoughToHit() async throws {
+    try await withPanel { panel in
+      configureHeld(panel, held: [])
+      panel.controller.errors.report(WallpaperActionError(message: "The engine is unavailable."))
+      await AccessibilityClient.connect()
+      let hosting = NSHostingView(rootView: PanelBanners().environment(panel.controller).frame(width: 640))
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 640, height: 120), styleMask: [.borderless],
+        backing: .buffered, defer: true)
+      window.isReleasedWhenClosed = false
+      window.contentView = hosting
+      defer { window.close() }
+      hosting.layoutSubtreeIfNeeded()
+      try await Task.sleep(for: .milliseconds(200))
+      let dismiss = try XCTUnwrap(
+        AccessibilityElement(object: hosting).first(identifier: "dismiss-error"), "the banner has Dismiss")
+      XCTAssertGreaterThanOrEqual(dismiss.frame.width, 24, "the whole square, not the glyph")
+      XCTAssertGreaterThanOrEqual(dismiss.frame.height, 24)
+    }
+  }
 }
 
 /// What the panel handed to VoiceOver, in order.

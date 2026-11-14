@@ -216,7 +216,7 @@ struct WallpaperMachineShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: RandomWallpaperIntent(),
             phrases: ["Random wallpaper in \(.applicationName)", "Pick a random wallpaper with \(.applicationName)"],
-            shortTitle: "Random Wallpaper", systemImageName: "shuffle")
+            shortTitle: "Random Wallpaper", systemImageName: "dice")
         AppShortcut(
             intent: ApplyWallpaperIntent(),
             phrases: ["Apply a wallpaper with \(.applicationName)"],

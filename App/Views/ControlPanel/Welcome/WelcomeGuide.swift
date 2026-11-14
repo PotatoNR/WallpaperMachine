@@ -1,23 +1,12 @@
 import SwiftUI
 
-extension WelcomeStatusCard where Content == EmptyView {
-  init(
-    systemImage: String, title: Text, detail: Text? = nil, isSuccess: Bool = false,
-    working: WelcomeWorking? = nil
-  ) {
-    self.init(
-      systemImage: systemImage, title: title, detail: detail, isSuccess: isSuccess,
-      working: working
-    ) { EmptyView() }
-  }
-}
-
 /// The first-run guide over the window: the window dimmed, one card in the middle with the progress
 /// at the top, the page in the middle and the navigation pinned at the bottom.
 ///
-/// It is a page, not a dialog: Escape and a click outside the card do nothing, so it ends only with
-/// one of the three closing choices. The pages behind it are disabled and hidden from VoiceOver by
-/// the root.
+/// It ends with one of the Start page's three closing choices, or with **Skip setup** at the top
+/// right of every other page; Escape is **Skip setup**. A click outside the card does nothing: a
+/// stray click is no sign of wanting to leave. The pages behind it are disabled and hidden from
+/// VoiceOver by the root.
 struct WelcomeGuide: View {
   @Environment(\.panelTheme) private var theme
   @Environment(\.colorScheme) private var colorScheme
@@ -58,7 +47,10 @@ private struct WelcomeCard: View {
 
   var body: some View {
     VStack(spacing: 0) {
+      // Skip setup sits apart from the progress element, so VoiceOver reaches it as its own button,
+      // and apart from the footer's Skip, which only leaves one page.
       WelcomeProgress()
+        .overlay(alignment: .topTrailing) { WelcomeSkipSetupButton() }
       pageArea
       WelcomeFooter()
     }
@@ -98,7 +90,6 @@ private struct WelcomeCard: View {
   @ViewBuilder private var page: some View {
     switch model.step {
     case .language: WelcomeLanguagePage()
-    case .steam: WelcomeSteamPage()
     case .performance: WelcomePerformancePage()
     case .preferences: WelcomePreferencesPage()
     case .tips: WelcomeTipsPage()
@@ -109,10 +100,8 @@ private struct WelcomeCard: View {
 
 // MARK: - Progress
 
-/// The six steps as a row of dots joined by a line, with the name of the one on show under it. Any
-/// dot jumps to its page, forward or back; they wait while a choice is being committed. A step that
-/// needs the person (Steam asking for a code while another page is open) says so: its dot turns to
-/// the warning colour and the line under the dots names it.
+/// The five steps as a row of dots joined by a line, with the name of the one on show under it. Any
+/// dot jumps to its page, forward or back; they wait while a choice is being committed.
 private struct WelcomeProgress: View {
   @Environment(FirstRunModel.self) private var model
   @Environment(\.panelTheme) private var theme
@@ -128,21 +117,15 @@ private struct WelcomeProgress: View {
               .frame(width: 16, height: 1.5)
               .accessibilityHidden(true)
           }
-          WelcomeProgressDot(step: step, attention: attention(for: step))
+          WelcomeProgressDot(step: step)
         }
       }
       // The dots carry the names for VoiceOver; this line is for the eye.
-      HStack(spacing: 10) {
-        model.step.name.asText
-          .foregroundStyle(theme.surface.muted.color)
-        if model.steamNeedsAttention {
-          L("\(WelcomeStep.steam.name) · needs attention").asText
-            .foregroundStyle(theme.surface.warning.color)
-        }
-      }
-      .font(.system(size: 11.5, weight: .medium))
-      .lineLimit(1)
-      .accessibilityHidden(true)
+      model.step.name.asText
+        .foregroundStyle(theme.surface.muted.color)
+        .font(.system(size: 11.5, weight: .medium))
+        .lineLimit(1)
+        .accessibilityHidden(true)
     }
     .padding(.top, compact ? 12 : 16)
     .padding(.bottom, compact ? 4 : 8)
@@ -152,9 +135,26 @@ private struct WelcomeProgress: View {
   }
 
   private var accent: Color { theme.accent.primary.color }
+}
 
-  private func attention(for step: WelcomeStep) -> Bool {
-    step == .steam && model.steamNeedsAttention
+/// **Skip setup**: ends the guide from any page but the last (`FirstRunModel.skipSetup`), a quiet
+/// text button at the card's top right. Escape presses it. It waits, like the footer, while a choice
+/// is being committed.
+private struct WelcomeSkipSetupButton: View {
+  @Environment(FirstRunModel.self) private var model
+  @Environment(\.welcomeIsCompact) private var compact
+
+  var body: some View {
+    if model.offersSkipSetup {
+      Button("Skip setup") { model.skipSetup() }
+        .buttonStyle(.welcomeQuiet)
+        .keyboardShortcut(.cancelAction)
+        .disabled(model.navigationBusy)
+        .help(L("You can open this guide again from Settings → General."))
+        .accessibilityIdentifier("welcome-skip-setup")
+        .padding(.top, compact ? 8 : 12)
+        .padding(.trailing, compact ? 12 : 16)
+    }
   }
 }
 
@@ -165,7 +165,6 @@ private extension String {
 
 private struct WelcomeProgressDot: View {
   let step: WelcomeStep
-  let attention: Bool
 
   @Environment(FirstRunModel.self) private var model
   @Environment(\.panelTheme) private var theme
@@ -184,30 +183,15 @@ private struct WelcomeProgressDot: View {
     }
     .buttonStyle(.plain)
     .disabled(model.navigationBusy)
-    .help(label)
-    .accessibilityLabel(label)
+    .help(step.name)
+    .accessibilityLabel(step.name)
     .accessibilityAddTraits(isCurrent ? [.isSelected] : [])
     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isCurrent)
   }
 
-  /// The step's name; "needs attention" while Steam waits for the person.
-  private var label: String {
-    attention ? L("\(step.name) · needs attention") : step.name
-  }
-
   @ViewBuilder private var dot: some View {
     let accent = theme.accent
-    if attention {
-      // Not the accent of a finished step: the warning colour, with a halo, so a step that waits
-      // for the person stands out from the checked ones beside it.
-      let warning = theme.surface.warning.color
-      Image(systemName: "exclamationmark")
-        .font(.system(size: 9, weight: .heavy))
-        .foregroundStyle(theme.surface.background.color)
-        .frame(width: 16, height: 16)
-        .background(warning, in: Circle())
-        .background { Circle().fill(warning.opacity(0.25)).frame(width: 22, height: 22) }
-    } else if isDone {
+    if isDone {
       Image(systemName: "checkmark")
         .font(.system(size: 8, weight: .heavy))
         .foregroundStyle(accent.onPrimary.color)
@@ -234,7 +218,6 @@ private struct WelcomeFooter: View {
   @Environment(FirstRunModel.self) private var model
   @Environment(\.panelTheme) private var theme
   @Environment(\.welcomeIsCompact) private var compact
-  @AccessibilityFocusState private var continueHasFocus: Bool
 
   var body: some View {
     HStack(spacing: 8) {
@@ -258,7 +241,6 @@ private struct WelcomeFooter: View {
     .overlay(alignment: .top) {
       Rectangle().fill(theme.surface.divider.color).frame(height: 0.5)
     }
-    .onChange(of: model.continueFocusRequest) { continueHasFocus = true }
   }
 
   @ViewBuilder private var actions: some View {
@@ -269,17 +251,6 @@ private struct WelcomeFooter: View {
         .buttonStyle(.welcomeQuiet)
         .disabled(waiting)
       forward(Text("Continue")) { model.next() }.disabled(waiting)
-    case .steam:
-      let phase = model.phase
-      if phase.isSignedIn {
-        forward(Text("Continue")) { model.next() }
-      } else if phase.isInProgress {
-        Button("Skip and cancel sign-in") { Task { await model.skipSteam() } }
-          .buttonStyle(.welcomeQuiet)
-      } else {
-        Button("Skip for now") { Task { await model.skipSteam() } }
-          .buttonStyle(.welcomeQuiet)
-      }
     case .performance:
       Button("Skip") { model.skipPerformance() }
         .buttonStyle(.welcomeQuiet)
@@ -316,6 +287,5 @@ private struct WelcomeFooter: View {
     }
     .buttonStyle(.welcomePrimary)
     .keyboardShortcut(.defaultAction)
-    .accessibilityFocused($continueHasFocus)
   }
 }

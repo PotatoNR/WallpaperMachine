@@ -173,7 +173,7 @@ final class PanelLibraryActionsTests: PanelTestCase {
     }
   }
 
-  func testApplyingHidesTheAppOnlyWhenTheSettingIsOnNothingWaitsAndNoPromptIsPending() async throws {
+  func testApplyingHidesTheAppOnlyWhenTheSettingIsOnNothingWaitsAndNoPromptIsDue() async throws {
     let prompt = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults)
     try await withApplyingPanel(supportPrompt: prompt) { panel, bridge, _ in
       let controller = panel.controller
@@ -207,11 +207,44 @@ final class PanelLibraryActionsTests: PanelTestCase {
       XCTAssertEqual(bridge.assignments["primary"], "b")
       XCTAssertEqual(hidden, 2, "the first of the two did not hide the app, the last did")
 
-      // The support prompt is waiting for the user to see the app, so applying keeps it open.
+      // The first downloaded wallpaper hides the app like any other: the support offer it earns
+      // waits a day.
       prompt.recordDownload(wallpaperID: "c")
       try await controller.activate("c")
       XCTAssertTrue(prompt.isPending)
-      XCTAssertEqual(hidden, 2)
+      XCTAssertNil(controller.duePrompt)
+      XCTAssertEqual(hidden, 3)
+
+      // A prompt that is due waits for the user to see the app, so applying keeps it open.
+      prompt.qualifyForDiscordInvitation()
+      try await controller.activate("a")
+      XCTAssertEqual(controller.duePrompt, .discord)
+      XCTAssertEqual(hidden, 3)
+    }
+  }
+
+  /// Someone who skips the welcome guide and applies a first downloaded wallpaper the same day sees
+  /// it at once: the window hides and no one-time question comes up, though one would otherwise
+  /// be due.
+  func testSkippingSetupThenApplyingTheFirstDownloadedWallpaperHidesTheWindowAndAsksNothingThatDay()
+    async throws
+  {
+    let prompt = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults)
+    prompt.qualifyForDiscordInvitation()
+    try await withApplyingPanel(supportPrompt: prompt, welcomeSeen: false) { panel, _, _ in
+      let controller = panel.controller
+      var hidden = 0
+      controller.hideApplication = { hidden += 1 }
+      controller.welcome.open()
+      controller.welcome.skipSetup()
+      XCTAssertFalse(controller.shell.isWelcomeOpen)
+
+      panel.defaults.set(true, forKey: PanelPreferences.hideAfterActivatingKey)
+      prompt.recordDownload(wallpaperID: "c")
+      try await controller.activate("c")
+      XCTAssertEqual(hidden, 1, "The first downloaded wallpaper is made visible")
+      XCTAssertTrue(prompt.isPending, "The support offer is earned")
+      XCTAssertNil(controller.duePrompt, "but nothing is asked on the day the guide ended")
     }
   }
 
@@ -231,6 +264,166 @@ final class PanelLibraryActionsTests: PanelTestCase {
       try await controller.activate("c")
       XCTAssertNil(controller.activationFailures["c"], "an apply that succeeds clears it")
       XCTAssertEqual(bridge.assignments["primary"], "c")
+    }
+  }
+
+  func testApplyingASceneWithoutTheSharedResourcesOpensTheirSetupInsteadOfFailing() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      // "c" is a scene as far as the panel knows; its files still play once resources are there.
+      panel.store.librarySnapshot.wallpapers = panel.store.librarySnapshot.wallpapers.map {
+        var entry = $0
+        if entry.id == "c" { entry.kind = .projectScene }
+        return entry
+      }
+      XCTAssertEqual(controller.libraryRow(id: "c")?.kind, .scene)
+      XCTAssertFalse(panel.workshop.sceneAssetsReady)
+      controller.activationFailures["c"] = "An earlier failure."
+      let before = bridge.assignments
+
+      let applies: [@MainActor () async throws -> Void] = [
+        { try await controller.activate("c") }, { try await controller.reapply("c") },
+        { try await controller.activateAll("c") },
+      ]
+      for apply in applies {
+        controller.downloads.closeDialog()
+        let message = await banner(panel, apply)
+        XCTAssertNil(message, "the setup is the answer, not an error")
+        XCTAssertEqual(controller.downloads.target, WorkshopStore.sceneAssetsRequestID, "their setup opens")
+        XCTAssertEqual(bridge.assignments, before, "the renderer is not asked")
+      }
+      XCTAssertEqual(
+        controller.downloadRequestRows.map(\.id), [WorkshopStore.sceneAssetsRequestID],
+        "one request for the resources, however often Apply is pressed")
+      XCTAssertNil(controller.activationFailures["c"], "the resources notice says why, without a report")
+      let row = try XCTUnwrap(controller.libraryRow(id: "c"))
+      XCTAssertNil(controller.inspectorIssueReportURL(for: row))
+
+      // Installed meanwhile (found without waiting for the panel to come forward), it applies.
+      controller.downloads.closeDialog()
+      panel.sceneAssets.available = true
+      try await controller.activate("c")
+      XCTAssertEqual(bridge.assignments["primary"], "c")
+      XCTAssertFalse(controller.downloads.isDialogOpen)
+      XCTAssertNotNil(controller.inspectorIssueReportURL(for: row), "a scene that can play gets its report")
+    }
+  }
+
+  func testApplyingASceneNativeMetalRefusedAsksFirstAndCancelKeepsTheDisplay() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      panel.store.librarySnapshot.wallpapers = panel.store.librarySnapshot.wallpapers.map {
+        var entry = $0
+        if entry.id == "c" { entry.kind = .projectScene }
+        return entry
+      }
+      panel.sceneAssets.available = true
+      let library = panel.library
+      let verdicts = SceneDrawVerdicts(
+        file: panel.root.appendingPathComponent("SceneDrawVerdicts.json"), library: { library })
+      panel.store.sceneDrawVerdicts = verdicts
+      await verdicts.record("c", outcome: .notDrawn, stage: "unsupported", reason: "the scene uses a light probe")
+      bridge.sceneCapabilityAnswer = BridgeSceneCapability(
+        readError: nil, failureStage: "unsupported", failureReason: "the scene uses a light probe",
+        missingFiles: [])
+      let before = bridge.assignments
+
+      panel.dialogs.confirmAnswer = false
+      try await controller.activate("c")
+      try await controller.activateAll("c")
+      XCTAssertEqual(bridge.assignments, before, "Cancel leaves what the displays show")
+      XCTAssertEqual(panel.dialogs.confirmations.count, 2)
+      XCTAssertTrue(
+        panel.dialogs.confirmations.allSatisfy { $0.detail.contains("the scene uses a light probe") },
+        "the question says why")
+      XCTAssertEqual(bridge.sceneCapabilityReads, ["c", "c"], "the scene is read again before each question")
+
+      panel.dialogs.confirmAnswer = true
+      try await controller.activate("c")
+      XCTAssertEqual(bridge.assignments["primary"], "c", "the user may still apply it")
+      try await controller.reapply("c")
+      try await controller.activate("c")
+      XCTAssertEqual(panel.dialogs.confirmations.count, 3, "once it is shown, restarting or choosing it again asks nothing")
+
+      // A wallpaper with nothing known against it applies without a question.
+      try await controller.activate("a")
+      XCTAssertEqual(bridge.assignments["primary"], "a")
+      XCTAssertEqual(panel.dialogs.confirmations.count, 3)
+    }
+  }
+
+  func testARefusedSceneThatNowReadsCleanAppliesWithoutAQuestion() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      panel.store.librarySnapshot.wallpapers = panel.store.librarySnapshot.wallpapers.map {
+        var entry = $0
+        if entry.id == "c" { entry.kind = .projectScene }
+        return entry
+      }
+      panel.sceneAssets.available = true
+      let library = panel.library
+      let verdicts = SceneDrawVerdicts(
+        file: panel.root.appendingPathComponent("SceneDrawVerdicts.json"), library: { library })
+      panel.store.sceneDrawVerdicts = verdicts
+      await verdicts.record("c", outcome: .notDrawn, stage: "unsupported", reason: "an effect the old assets lacked")
+      // The shared resources were updated since: the refusal no longer holds.
+      bridge.sceneCapabilityAnswer = BridgeSceneCapability(
+        readError: nil, failureStage: nil, failureReason: nil, missingFiles: [])
+
+      try await controller.activate("c")
+      XCTAssertEqual(bridge.assignments["primary"], "c")
+      XCTAssertTrue(panel.dialogs.confirmations.isEmpty, "a refusal that no longer holds asks nothing")
+      let refreshed = await verdicts.verdict(for: "c")
+      XCTAssertEqual(refreshed?.outcome, .passedCheck, "and what was read replaces it")
+    }
+  }
+
+  func testATargetChosenWhileTheSceneIsReadAgainDoesNotRedirectTheApply() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      panel.store.librarySnapshot.wallpapers = panel.store.librarySnapshot.wallpapers.map {
+        var entry = $0
+        if entry.id == "c" { entry.kind = .projectScene }
+        return entry
+      }
+      panel.sceneAssets.available = true
+      let library = panel.library
+      let verdicts = SceneDrawVerdicts(
+        file: panel.root.appendingPathComponent("SceneDrawVerdicts.json"), library: { library })
+      panel.store.sceneDrawVerdicts = verdicts
+      await verdicts.record("c", outcome: .notDrawn, stage: "unsupported", reason: "a light probe")
+      bridge.sceneCapabilityAnswer = BridgeSceneCapability(
+        readError: nil, failureStage: nil, failureReason: nil, missingFiles: [])
+      panel.navigation.targetDisplayID = "primary"
+      bridge.whileReadingScene = { panel.navigation.targetDisplayID = "secondary" }
+
+      try await controller.activate("c")
+      XCTAssertEqual(bridge.assignments["primary"], "c", "the display targeted when Apply was pressed")
+      XCTAssertEqual(bridge.assignments["secondary"], "b", "the one chosen during the wait is left alone")
+    }
+  }
+
+  func testWhenTheSceneCannotBeReadAgainTheRememberedRefusalStillAsks() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      panel.store.librarySnapshot.wallpapers = panel.store.librarySnapshot.wallpapers.map {
+        var entry = $0
+        if entry.id == "c" { entry.kind = .projectScene }
+        return entry
+      }
+      panel.sceneAssets.available = true
+      let library = panel.library
+      let verdicts = SceneDrawVerdicts(
+        file: panel.root.appendingPathComponent("SceneDrawVerdicts.json"), library: { library })
+      panel.store.sceneDrawVerdicts = verdicts
+      await verdicts.record("c", outcome: .notDrawn, stage: "unsupported", reason: "a light probe")
+      bridge.sceneCapabilityAnswer = nil
+      let before = bridge.assignments
+
+      try await controller.activate("c")
+      XCTAssertEqual(panel.dialogs.confirmations.count, 1)
+      XCTAssertTrue(panel.dialogs.confirmations.first?.detail.contains("a light probe") == true)
+      XCTAssertEqual(bridge.assignments, before)
     }
   }
 
@@ -302,15 +495,41 @@ final class PanelLibraryActionsTests: PanelTestCase {
       XCTAssertEqual(asked.count, 2, "without a rotation Next never asks the scheduler")
       XCTAssertEqual(bridge.assignments["primary"], "b")
 
-      // With nothing else to take it does nothing.
+      // With nothing else to take it says so, as a rotating playlist does, and changes nothing.
       panel.store.librarySnapshot.wallpapers.removeAll { $0.id != "b" }
-      try await controller.nextWallpaper()
+      let nothingElse = await banner(panel) { try await controller.nextWallpaper() }
+      XCTAssertNotNil(nothingElse, "a Next that cannot move says why")
       XCTAssertEqual(bridge.assignments["primary"], "b")
-      XCTAssertNil(controller.errors.message)
 
       bridge.mirrors["secondary"] = "primary"
       try await panel.store.refreshAllAsync()
       let mirrored = await banner(panel) { try await controller.nextWallpaper(displayID: "secondary") }
+      XCTAssertNotNil(mirrored, "a mirrored display follows its source")
+    }
+  }
+
+  func testRandomChangesTheTargetDisplayToAnotherWallpaperAndSaysWhenThereIsNone() async throws {
+    try await withApplyingPanel { panel, bridge, _ in
+      let controller = panel.controller
+      XCTAssertEqual(bridge.assignments["primary"], "a")
+      try await controller.randomWallpaper()
+      let picked = try XCTUnwrap(bridge.assignments["primary"])
+      XCTAssertNotEqual(picked, "a", "never the wallpaper on show")
+      XCTAssertTrue(
+        panel.playlists.randomRounds.values.contains { $0.contains(picked) },
+        "the pick is remembered in the panel's own playlists, so every wallpaper comes round")
+
+      // A wallpaper held back after a crash is never picked, so holding every other one leaves none.
+      let others = panel.store.librarySnapshot.wallpapers.map(\.id).filter { $0 != picked }
+      panel.store.appSnapshot.heldWallpaperIds = others
+      let nothingElse = await banner(panel) { try await controller.randomWallpaper() }
+      XCTAssertNotNil(nothingElse, "a Random that cannot pick says why")
+      XCTAssertEqual(bridge.assignments["primary"], picked)
+      panel.store.appSnapshot.heldWallpaperIds = []
+
+      bridge.mirrors["secondary"] = "primary"
+      try await panel.store.refreshAllAsync()
+      let mirrored = await banner(panel) { try await controller.randomWallpaper(displayID: "secondary") }
       XCTAssertNotNil(mirrored, "a mirrored display follows its source")
     }
   }
@@ -359,6 +578,50 @@ final class PanelLibraryActionsTests: PanelTestCase {
     panel.bridge.snapshot = nil
     let message = await banner(panel) { try await controller.refresh() }
     XCTAssertNotNil(message, "a library that cannot be read is shown until it is dismissed or recurs")
+  }
+
+  /// The library's Refresh says what the rescan found, since one that found nothing looks like
+  /// nothing happened; and a library that could not be read at all is not shown as an empty one.
+  func testRefreshSaysWhatItFoundAndAnUnreadableLibraryIsNotAnEmptyOne() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let store = panel.store
+    let model = panel.controller.library
+    func serve(_ ids: [String]) {
+      var library = store.librarySnapshot
+      library.wallpapers = ids.map { wallpaper($0) }
+      let bundle = BridgeSnapshotBundle(
+        app: store.appSnapshot, library: library, wallpaperOptions: nil,
+        monitorInformation: store.monitorInformationSnapshot, settings: store.settingsSnapshot)
+      panel.bridge.bundleProvider = { bundle }
+      panel.bridge.snapshot = bundle
+    }
+
+    serve(["a"])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Library refreshed: \(1) added, \(0) removed."))
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Your library is up to date."))
+    serve(["b", "c"])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.notice, L("Library refreshed: \(2) added, \(1) removed."))
+    XCTAssertNil(model.noticeLink)
+
+    // The read fails with wallpapers on show: they stay, and the banner says why.
+    panel.bridge.bundleProvider = nil
+    panel.bridge.snapshot = nil
+    await model.refreshLibrary().value
+    XCTAssertNil(model.emptyState, "what was read before is still shown")
+
+    // It fails with nothing read: the grid says the library could not be read.
+    store.librarySnapshot.wallpapers = []
+    await model.refreshLibrary().value
+    guard case .failed = model.emptyState else {
+      return XCTFail("an unreadable library is \(String(describing: model.emptyState)), not empty")
+    }
+    serve([])
+    await model.refreshLibrary().value
+    XCTAssertEqual(model.emptyState, .emptyLibrary, "read and found empty, it is an empty library")
   }
 
   func testOnlyAnEnabledDisplayThatShowsItsOwnWallpaperCanBecomeTheTarget() async throws {

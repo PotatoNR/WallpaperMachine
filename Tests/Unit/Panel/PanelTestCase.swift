@@ -37,23 +37,24 @@ class PanelTestCase: XCTestCase {
   func makeController(
     displayTitles: DisplayTitleResolver = .renderer, supportPrompt: SupportPromptStore? = nil,
     spaces: WallpaperSpaceMonitor? = nil, welcomeSeen: Bool = true,
-    letterbox: VideoLetterboxStore? = nil
+    letterbox: VideoLetterboxStore? = nil, nativeSession: SteamNativeSession? = nil
   ) throws -> PanelFixture {
     let fixture = makeStore(supportPrompt: supportPrompt)
     return try PanelFixture(
       store: fixture.store, bridge: fixture.bridge, displayTitles: displayTitles, spaces: spaces,
-      welcomeSeen: welcomeSeen, letterbox: letterbox)
+      welcomeSeen: welcomeSeen, letterbox: letterbox, nativeSession: nativeSession)
   }
 
   /// `makeController` that is started, handed to `body` and always shut down afterwards.
   func withPanel(
     displayTitles: DisplayTitleResolver = .renderer, supportPrompt: SupportPromptStore? = nil,
     spaces: WallpaperSpaceMonitor? = nil, welcomeSeen: Bool = true,
+    nativeSession: SteamNativeSession? = nil,
     _ body: (PanelFixture) async throws -> Void
   ) async throws {
     let panel = try makeController(
       displayTitles: displayTitles, supportPrompt: supportPrompt, spaces: spaces,
-      welcomeSeen: welcomeSeen)
+      welcomeSeen: welcomeSeen, nativeSession: nativeSession)
     do {
       try await panel.start()
       try await body(panel)
@@ -360,6 +361,8 @@ final class PanelFixture {
   let theme: AppThemeStore
   let playlists: PlaylistStore
   let automations: WallpaperAutomationStore
+  let solarLocationManager = FakeSolarLocationManager()
+  lazy var solarLocationTracker = SolarLocationTracker(store: automations, manager: solarLocationManager)
   let spaces: WallpaperSpaceMonitor
   /// The condition rules engaged, as the app's monitor would publish them; empty until a test sets it.
   let systemConditions = SystemConditionState()
@@ -372,6 +375,9 @@ final class PanelFixture {
   let pickers = PanelPickers()
   /// Whether the scene assets are installed, as the Workshop store's readiness check sees it.
   let sceneAssets = PanelSceneAssets()
+  /// Stands in for this Mac's Translation framework in every controller the fixture builds: every
+  /// language downloaded, no answers until a test gives some.
+  let translation = FakeTranslation()
   /// The controller under test, built over the stores above on first use.
   lazy var controller: PanelController = buildController()
   let executable: URL
@@ -385,7 +391,8 @@ final class PanelFixture {
 
   init(store: BridgeStore, bridge: LayoutSnapshotBridge, displayTitles: DisplayTitleResolver,
     pixivTransport: (any PixivTransport)? = nil, spaces: WallpaperSpaceMonitor? = nil,
-    welcomeSeen: Bool = true, letterbox: VideoLetterboxStore? = nil) throws {
+    welcomeSeen: Bool = true, letterbox: VideoLetterboxStore? = nil,
+    nativeSession: SteamNativeSession? = nil) throws {
     self.store = store
     self.bridge = bridge
     self.displayTitles = displayTitles
@@ -398,23 +405,14 @@ final class PanelFixture {
     previousHome = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_HOME"]
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     executable = root.appendingPathComponent("steamcmd")
-    // A download prints its password prompt and blocks until `advance` appears; a sign-in-only
-    // session (no `+workshop_download_item`) reads the password, records it and signs in.
+    // A download prints its password prompt and blocks until `advance` appears. With
+    // `reads-password` beside it, it first reads the answer and records it in `password`.
     try Data("""
       #!/bin/sh
-      mode=signin
-      for argument in "$@"; do [ "$argument" = +workshop_download_item ] && mode=download; done
       printf 'Password:\\n'
-      if [ "$mode" = signin ]; then
+      if [ -e "\(root.path)/reads-password" ]; then
         IFS= read -r password
         printf '%s' "$password" > "\(root.path)/password"
-        printf 'Waiting for user info...OK\\n'
-        if [ -f "\(root.path)/ownership" ]; then
-          cat "\(root.path)/ownership"
-        else
-          printf 'License packageID 12345:\\n - State : Active( flags 512 )\\n - Apps : 431960, (1 in total)\\n'
-        fi
-        exit 0
       fi
       while [ ! -e "\(root.path)/advance" ]; do /bin/sleep 0.02; done
       printf 'Downloading item 222\\n'
@@ -431,7 +429,7 @@ final class PanelFixture {
       service: WorkshopService(session: OfflineSteamProtocol.session()),
       downloader: downloader, supportDirectory: root, defaults: defaults,
       runtimeProvider: PanelRuntime(), updates: OfflineSteamProtocol.updates(defaults: defaults),
-      sceneAssetsAvailable: { [sceneAssets] _ in sceneAssets.available })
+      sceneAssetsAvailable: { [sceneAssets] _ in sceneAssets.available }, nativeSession: nativeSession)
     let image = try PanelTestCase.gif(frames: 1, brightness: 0.6)
     self.image = image
     let transport = PixivFixtureTransport(respondingToSession: { url, session in
@@ -453,7 +451,7 @@ final class PanelFixture {
       service: PixivService(transport: pixivTransport ?? transport, minimumInterval: .zero),
       packager: PixivWallpaperPackager(library: library),
       sessions: pixivSessions)
-    theme = AppThemeStore(defaults: defaults)
+    theme = AppThemeStore(defaults: defaults, now: { .outsideAnySeason })
     playlists = PlaylistStore(defaults: defaults)
     automations = WallpaperAutomationStore(defaults: defaults)
     self.spaces = spaces ?? WallpaperSpaceMonitor()
@@ -476,6 +474,7 @@ final class PanelFixture {
   func buildController() -> PanelController {
     let library = self.library
     let image = self.image
+    let language = AppLanguageStore.english()
     let controller = PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv,
       presentation: presentation, theme: theme, displayTitles: displayTitles, defaults: defaults,
@@ -489,10 +488,12 @@ final class PanelFixture {
           keepsAnimation: false),
         libraryRoot: { library }),
       dialogs: dialogs,
-      appLanguage: .english(), playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
+      appLanguage: language, playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
       backup: backup, imagePlacement: imagePlacement, compatibility: compatibility, letterbox: letterbox,
-      automations: automations, spaces: self.spaces, systemConditions: systemConditions)
+      automations: automations, solarLocationTracker: solarLocationTracker,
+      spaces: self.spaces, systemConditions: systemConditions,
+      searchTranslation: .fake(defaults: defaults, backend: translation, language: language))
     controller.signInToPixiv = { nil }
     return controller
   }
@@ -504,14 +505,34 @@ final class PanelFixture {
     try await waitUntil(timeout: 15) { !self.workshop.steamCMDSetup.isBusy }
   }
 
-  /// The sign-in-only job once the guide has started it.
-  func waitForSignIn() async throws -> WorkshopDownload {
-    try await waitUntil(timeout: 5) { self.workshop.downloader.signIn != nil }
-    return try XCTUnwrap(workshop.downloader.signIn)
+  /// Saves `account` on this Mac as a kept Steam sign-in would (`controller.steamAccount.saved`).
+  /// The fake SteamCMD keeps no session of its own, so the one Steam would have saved is written
+  /// while a download of it waits at its password prompt; the queue reads it back once that
+  /// download, cancelled, has ended, and the cancelled download is cleared away.
+  func saveSteamAccount(_ account: String = "fixture") async throws {
+    let item = WorkshopItem(
+      id: "222", title: "Fixture", creator: "Fixture", summary: "", previewURL: nil, tags: ["Video"],
+      size: 0, subscriptions: 0)
+    workshop.downloader.start(
+      item: item, username: account, executable: executable, library: library, rememberSession: true,
+      onImported: {})
+    let job = try XCTUnwrap(workshop.downloader.download(for: item.id))
+    try await waitUntil(timeout: 15) { job.worker.prompt == .password }
+    let session = root.appendingPathComponent("session", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: session, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try Data(account.utf8).write(to: session.appendingPathComponent("account"))
+    workshop.downloader.cancel(job)
+    try await waitUntil(timeout: 15) { !job.isPending }
+    workshop.clearDownloadActivity()
   }
 
-  /// Shows the panel to everything gated on visibility, as a window ordered front would.
-  func show() { presentation.show(); controller.refreshVisibilityGatedWork() }
+  /// Shows the panel to everything gated on visibility, as a window ordered front would. `date` is
+  /// when it was shown, for a window that has been open a while.
+  func show(at date: Date = Date()) {
+    presentation.show(at: date)
+    controller.refreshVisibilityGatedWork()
+  }
   func hide() { presentation.hide(); controller.refreshVisibilityGatedWork() }
 
   /// Waits for a state, never a duration: the deadline only matters when the machine is slow (the
@@ -573,6 +594,7 @@ final class PanelFixture {
   }
 
   func shutdown() async {
+    solarLocationTracker.stop()
     hide()
     controller.stop()
     compatibility.select(nil)

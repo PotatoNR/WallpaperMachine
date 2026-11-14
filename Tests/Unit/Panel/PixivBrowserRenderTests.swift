@@ -291,6 +291,22 @@ final class PixivBrowserRenderTests: MediaPanelTestCase {
     }
   }
 
+  /// The first fetch shows the same ring as the Library's first read, which stops in a hidden
+  /// window and with Reduce Motion, never the system spinner, which keeps turning.
+  func testTheLoadingPageShowsThePanelsRingAndNoSystemSpinner() async throws {
+    let gate = PixivGate()
+    let hosted = try host(listing: .held(gate))
+    hosted.controller.launch { try await hosted.controller.navigate(.pixiv) }
+    try await hosted.layout(at: sizes[0])
+    XCTAssertEqual(
+      PixivEmptyState.make(hosted.controller.pixivBrowse), .loading, "pixiv has not answered yet")
+    XCTAssertNotNil(
+      AccessibilityElement(object: hosted.hosting.view).first(identifier: "pixiv-page"),
+      "the page is drawn, so an empty tree cannot pass")
+    XCTAssertEqual(AccessibilityElement.systemProgressIndicators(in: hosted.hosting.view), [])
+    gate.open()
+  }
+
   func testAPageListThatCannotBeReadIsSaidWithTryAgainForAWorkOfOnePageToo() async throws {
     // 301 has one page, and pixiv shows its page list to members only.
     let hosted = try host(membersOnly: [301])
@@ -492,11 +508,30 @@ final class PixivBrowserRenderTests: MediaPanelTestCase {
     XCTAssertFalse(PixivActivityPill.isActive(in: controller))
     try await hosted.layout(at: sizes[1])
     let idle = hosted.contentToolbarItems.count
+    let inspector = hosted.standalone(PixivInspector(), size: NSSize(width: 300, height: 760))
+    func height(of identifier: String) throws -> CGFloat {
+      inspector.layoutSubtreeIfNeeded()
+      let found = AccessibilityElement(object: inspector).first(identifier: identifier)
+      return try XCTUnwrap(found, "\(identifier) is drawn").frame.height
+    }
+    let download = try height(of: "pixiv-download")
 
     try await controller.pixivDownload(workID: "302", page: 0)
     try await hosted.fixture.waitUntil(timeout: 5) {
       hosted.fixture.pixiv.downloads.download(for: "pixiv-302-p0")?.status == .downloading
     }
+    try await Task.sleep(for: .milliseconds(300))
+    // Pause and Cancel take Download's place at its height, the panel's quiet button beside the
+    // accent one, so nothing under them moves when a save starts.
+    XCTAssertEqual(try height(of: "pixiv-pause"), download, accuracy: 1)
+    XCTAssertEqual(try height(of: "pixiv-cancel"), download, accuracy: 1)
+    // pixiv has not said the original's size yet: the inspector's bar is the panel's, which
+    // stops in a hidden window and with Reduce Motion, never the system's, which slides on.
+    guard case .pending(let saving) = controller.pixivSelection?.download else {
+      return XCTFail("the inspector follows the save")
+    }
+    XCTAssertNil(saving.progress, "the size is not known while pixiv holds the original")
+    XCTAssertEqual(AccessibilityElement.systemProgressIndicators(in: inspector), [])
     XCTAssertTrue(PixivActivityPill.isActive(in: controller))
     XCTAssertEqual(controller.pixivActivity?.jobCount, 1)
     let work = try XCTUnwrap(hosted.fixture.pixiv.works.first { $0.id == "302" })

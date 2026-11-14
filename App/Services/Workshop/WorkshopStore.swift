@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-struct WorkshopQuery: Equatable, Sendable {
+struct WorkshopQuery: Hashable, Sendable {
   let text: String
   let kind: WorkshopKind
   let sort: WorkshopSort
@@ -11,13 +11,17 @@ struct WorkshopQuery: Equatable, Sendable {
   var excludedTags: [String] = []
   /// Where the tiles come from; only the browse and collections lists read `text` and `sort`.
   var source: WorkshopSource = .browse
+  /// The order of the favorites list; no other source reads it.
+  var favoritesOrder: WorkshopFavoritesOrder = .dateFavorited
+  /// The words as typed when `text` is their English translation; Steam never sees it.
+  var translation: WorkshopSearchTranslation? = nil
 
   /// The Workshop item a pasted link or id names. Only the wallpapers list takes it: the
   /// other sources read `text` as words to search for.
   var itemID: String? { source == .browse ? WorkshopLink.itemID(in: text) : nil }
 }
 
-struct WorkshopRequest: Equatable, Sendable {
+struct WorkshopRequest: Hashable, Sendable {
   let query: WorkshopQuery
   let page: Int
 }
@@ -30,8 +34,7 @@ enum WorkshopDownloadStage: String, Sendable {
 /// A retained download intent. One click keeps the wallpaper the user asked for while
 /// the runtime, the Steam account, and shared scene assets are resolved in turn.
 struct WorkshopDownloadRequest: Identifiable, Codable, Sendable {
-  /// Workshop item id, `WorkshopStore.sceneAssetsRequestID` for the shared assets download, or
-  /// `WorkshopStore.signInRequestID` for a sign-in that downloads nothing.
+  /// Workshop item id, or `WorkshopStore.sceneAssetsRequestID` for the shared assets download.
   let id: String
   let item: WorkshopItem?
   var account: String
@@ -63,6 +66,13 @@ struct ApplyOnArrival: Equatable, Sendable {
 @Observable
 final class WorkshopStore {
   var searchText = ""
+  /// The English words a search typed in another language was translated into. The search
+  /// sends them instead of `searchText` while that text is the one they translate.
+  var searchTranslation: WorkshopSearchTranslation?
+  /// The text whose translation the person turned down (**Search “…” instead**): it is searched
+  /// as typed until another text is searched. Kept here, with the app's search, so a reopened
+  /// panel keeps it too.
+  var declinedTranslationText: String?
   var kind: WorkshopKind = .all
   var sort: WorkshopSort = .trendingYear
   var tags: [String] = []
@@ -72,6 +82,8 @@ final class WorkshopStore {
   /// rated in, genre-less items are hidden, and Application / Asset are never offered.
   static let defaultExcludedTags = ["Application", "Asset", "Questionable", "Mature", "Unspecified"]
   var selectedItem: WorkshopItem?
+  /// The order Steam lists the account's favorites in.
+  var favoritesOrder: WorkshopFavoritesOrder = .dateFavorited
   /// Where the next search looks. Opening an author or a collection remembers the source it
   /// was opened from, so Back returns to it.
   var source: WorkshopSource = .browse
@@ -81,9 +93,23 @@ final class WorkshopStore {
   /// The Steam Community session subscriptions are read with. `webSessions` keeps it between
   /// launches; it ends on Sign Out, or when Steam refuses to renew it.
   private(set) var steamWebSession: SteamWebSession?
+  /// What the signed-in account subscribes to on Steam, which the Workshop tiles mark: read
+  /// by `refreshSubscribedIDs`, then kept by what `setSubscribed` changed. Empty signed out.
+  private(set) var subscribedIDs: Set<String> = []
+  /// The SteamID whose subscriptions `subscribedIDs` holds since a read of them succeeded.
+  private var subscriptionsReadFor: String?
+  /// Whether `subscribedIDs` says what the signed-in account subscribes to: Steam has answered a
+  /// read for this account. Until then a wallpaper missing from it may be subscribed after all.
+  var subscriptionsKnown: Bool {
+    steamWebSession.map { $0.steamID == subscriptionsReadFor } ?? false
+  }
   /// Where the session is kept between launches; nil keeps it in memory only.
   @ObservationIgnored private let webSessions: (any SteamWebSessionStoring)?
   @ObservationIgnored private var webSessionRestore: Task<Void, Never>?
+  /// Subscription reads in flight, and the changes Steam accepted while any was: a read lays
+  /// those made after it started over what Steam sent. Emptied once no read is in flight.
+  @ObservationIgnored private var subscriptionReads = 0
+  @ObservationIgnored private var editsDuringReads: [(id: String, subscribed: Bool)] = []
   /// The renewal in flight, which every reader of an expired session waits for.
   @ObservationIgnored private var webSessionRenewal: Task<SteamWebSession, Error>?
   private(set) var isSigningInToSteamWeb = false
@@ -123,11 +149,16 @@ final class WorkshopStore {
   var errorMessage: String?
   let downloader: WorkshopDownloadManager
   let steamCMDSetup: SteamCMDSetupStore
+  /// The QR-code sign-in. While it is signed in, downloads use the app's own Steam client
+  /// instead of SteamCMD; nil in tests that never touch the keychain.
+  let nativeSession: SteamNativeSession?
   /// Which installed Workshop wallpapers have updates; an update downloads like any item.
   let updates: WorkshopUpdateStore
   @ObservationIgnored private let service: WorkshopService
   @ObservationIgnored private let defaults: UserDefaults
-  static let concurrentDownloadsKey = "WallpaperMachine.concurrentDownloads"
+  nonisolated static let concurrentDownloadsKey = "WallpaperMachine.concurrentDownloads"
+  /// The sort and filters of the last search, kept across launches (and so across updates).
+  static let browseFiltersKey = "WallpaperMachine.workshopBrowseFilters"
   var username = ""
   var selectedDownloadID: String?
   var showsDownloadDetails = false
@@ -147,9 +178,17 @@ final class WorkshopStore {
   @ObservationIgnored private let requestFile: URL
   @ObservationIgnored private weak var downloadBridge: BridgeStore?
   @ObservationIgnored private var observingDownloads = false
+  /// Jobs whose sign-in ended for no reason Steam gave, waiting for the SteamCMD check it calls for.
+  @ObservationIgnored private var awaitingSteamCMDCheck: Set<String> = []
+  /// Jobs already tried again after such a check updated SteamCMD: a second failure is the user's.
+  @ObservationIgnored private var retriedAfterSteamCMDUpdate: Set<String> = []
+  /// That check is running; the failure and the end of downloads both ask for it, and one is enough.
+  @ObservationIgnored private var checkingSteamCMD = false
+  /// Runs that check: `SteamCMDSetupStore.updateIfOutdated`, which says whether SteamCMD changed.
+  /// Tests stand in for Valve's servers here.
+  @ObservationIgnored var updateSteamCMD: @MainActor (TimeInterval) async -> Bool = { _ in false }
 
   static let sceneAssetsRequestID = "scene-assets"
-  static let signInRequestID = WorkshopDownloadManager.signInID
 
   var hasDownloadActivity: Bool { !downloader.downloads.isEmpty || !downloadRequests.isEmpty }
   var selectedDownload: WorkshopDownload? {
@@ -177,22 +216,27 @@ final class WorkshopStore {
 
   convenience init(service: WorkshopService = WorkshopService()) {
     self.init(
-      service: service, downloader: WorkshopDownloadManager(),
-      webSessions: KeychainSteamWebSessionStore())
+      service: service, downloader: WorkshopDownloadManager(), storageDirectory: ClientPaths.storageURL,
+      webSessions: KeychainSteamWebSessionStore(), nativeSession: SteamNativeSession())
   }
 
+  /// `storageDirectory` holds the partial downloads, beside the library (`ClientPaths.storageURL`);
+  /// nil keeps them in `supportDirectory`, as a test's single temporary folder wants.
   init(
     service: WorkshopService = WorkshopService(), downloader: WorkshopDownloadManager,
-    supportDirectory: URL = ClientPaths.supportURL, defaults: UserDefaults = ClientPreferences.defaults,
+    supportDirectory: URL = ClientPaths.supportURL, storageDirectory: URL? = nil,
+    defaults: UserDefaults = ClientPreferences.defaults,
     runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
     updates: WorkshopUpdateStore? = nil,
     sceneAssetsLocation: @escaping @MainActor () -> URL = { ClientPaths.assetsURL },
     sceneAssetsAvailable: @escaping @MainActor (URL) -> Bool = { ClientPaths.hasSceneAssets(at: $0) },
     webSessions: (any SteamWebSessionStoring)? = nil,
+    nativeSession: SteamNativeSession? = nil,
     now: @escaping @MainActor () -> Date = Date.init
   ) {
     self.service = service
     self.webSessions = webSessions
+    self.nativeSession = nativeSession
     self.now = now
     requestFile = supportDirectory.appendingPathComponent("Downloads/workshop-requests.json")
     self.downloader = downloader
@@ -209,11 +253,13 @@ final class WorkshopStore {
     self.steamCMDSetup = SteamCMDSetupStore(
       downloader: downloader, supportDirectory: supportDirectory,
       defaults: defaults, runtimeProvider: runtimeProvider)
-    downloader.configurePersistence(at: ClientPaths.workshopDownloadsURL(in: supportDirectory))
+    downloader.configurePersistence(at: ClientPaths.workshopDownloadsURL(in: storageDirectory ?? supportDirectory))
     if let data = try? Data(contentsOf: requestFile),
       let saved = try? JSONDecoder().decode([WorkshopDownloadRequest].self, from: data)
     {
-      downloadRequests = saved.filter { $0.id != Self.signInRequestID }.map {
+      // Only the shared assets are requested without an item; any other item-less request has
+      // nothing to download and must not be taken for them.
+      downloadRequests = saved.filter { $0.item != nil || $0.id == Self.sceneAssetsRequestID }.map {
         var request = $0
         request.isPaused = true
         return request
@@ -221,6 +267,23 @@ final class WorkshopStore {
       // A crash between queue handoff writes may leave both records; the retained request wins.
       for request in downloadRequests { downloader.transferPausedToRequest(id: request.id) }
     }
+    restoreBrowseFilters()
+    updateSteamCMD = { [steamCMDSetup] in await steamCMDSetup.updateIfOutdated(within: $0) }
+    downloader.onUnexplainedSignInFailure = { [weak self] job in self?.checkSteamCMD(after: job) }
+    nativeSession?.onChange = { [weak self] in self?.steamQRSignInChanged() }
+  }
+
+  /// A QR sign-in takes the place of the account form, so requests the queue refused for the
+  /// account they named may go again: the prerequisite observer starts them. One the queue
+  /// refuses once more stays refused, so nothing retries in a loop.
+  private func steamQRSignInChanged() {
+    guard nativeSession?.isSignedIn == true else { return }
+    var changed = false
+    for index in downloadRequests.indices where downloadRequests[index].refused {
+      downloadRequests[index].refused = false
+      changed = true
+    }
+    if changed { persistDownloadRequests() }
   }
 
   func showDownload(_ job: WorkshopDownload) {
@@ -308,23 +371,6 @@ final class WorkshopStore {
     requestDownload(item: item, rememberSession: rememberSession, bridge: bridge)
   }
 
-  /// Signs in to Steam without downloading anything, so the account and its saved sign-in are in
-  /// place before the first download. Rides the same ladder as a download: SteamCMD must be set
-  /// up first, and a running sign-in is shown rather than started twice.
-  func requestSignIn(account: String, rememberSession: Bool, bridge: BridgeStore) {
-    startDownloadLifecycle(bridge: bridge)
-    if let job = downloader.signIn, job.isPending {
-      showDownload(job)
-      return
-    }
-    username = account
-    resolve(
-      WorkshopDownloadRequest(
-        id: Self.signInRequestID, item: nil, account: account,
-        rememberSession: rememberSession, includesResources: true),
-      bridge: bridge)
-  }
-
   /// Supplies the account and the consent a retained request is waiting on, then resumes it.
   /// Returns `false` when the id names neither a retained request nor a known Workshop item.
   @discardableResult
@@ -334,7 +380,7 @@ final class WorkshopStore {
   ) -> Bool {
     startDownloadLifecycle(bridge: bridge)
     let existing = downloadRequests.first { $0.id == id }
-    let itemless = id == Self.sceneAssetsRequestID || id == Self.signInRequestID
+    let itemless = id == Self.sceneAssetsRequestID
     let item = itemless ? nil : existing?.item ?? workshopItem(id: id)
     guard itemless || item != nil else { return false }
     username = account
@@ -345,6 +391,23 @@ final class WorkshopStore {
         includesResources: existing?.includesResources == true || includeResources),
       bridge: bridge)
     return true
+  }
+
+  /// A failed SteamCMD sign-in returns to the account choice instead of immediately starting
+  /// the same sign-in again. A QR session acquired since the failure can serve the retry directly.
+  func retryDownload(_ job: WorkshopDownload, rememberSession: Bool, bridge: BridgeStore) {
+    guard !job.isPending else { return }
+    let request = WorkshopDownloadRequest(
+      id: job.id, item: job.item, account: job.account,
+      rememberSession: rememberSession, includesResources: false, refused: true)
+    if job.steamCMD?.canRetryAuthentication == true, nativeEngine(for: request) == nil {
+      startDownloadLifecycle(bridge: bridge)
+      resolve(request, bridge: bridge)
+    } else {
+      continueDownload(
+        id: job.id, account: job.account, rememberSession: rememberSession,
+        includeResources: false, bridge: bridge)
+    }
   }
 
   func removeDownloadRequest(id: String) {
@@ -365,7 +428,8 @@ final class WorkshopStore {
   /// account, so nothing signs in again under the name the user rejected. Consent already
   /// given for shared assets is preserved; other queued jobs are untouched.
   func changeDownloadAccount(id: String) async {
-    guard let job = downloader.downloads.first(where: { $0.id == id }) else { return }
+    // Only SteamCMD takes an account per job; the QR sign-in's account changes in Settings.
+    guard let job = downloader.downloads.first(where: { $0.id == id }), job.steamCMD != nil else { return }
     let item = job.item
     let rememberSession = downloader.rememberSessionWhileRunning ?? true
     downloader.cancel(job)
@@ -394,6 +458,8 @@ final class WorkshopStore {
       _ = sceneAssetsReady
       _ = username
       _ = downloader.savedAccount
+      // A QR sign-in made anywhere (Settings, the dialog) lets waiting requests go.
+      _ = nativeSession?.isSignedIn
       _ = downloader.isRunning
       _ = downloadRequests
     } onChange: { [weak self] in
@@ -401,6 +467,7 @@ final class WorkshopStore {
         guard let self, let bridge = self.downloadBridge else { return }
         self.resumeDownloadRequests(bridge: bridge)
         self.settleApplyIntentsAwaitingAssets(bridge: bridge)
+        self.runPendingSteamCMDCheck()
         self.observeDownloadPrerequisites()
       }
     }
@@ -421,10 +488,14 @@ final class WorkshopStore {
   }
 
   func stage(for request: WorkshopDownloadRequest) -> WorkshopDownloadStage {
+    // Signed in with a QR code: no SteamCMD to set up and no account name to type.
+    if nativeEngine(for: request) != nil {
+      // A request the queue refused waits on the dialog, whose account stage continues it.
+      if request.refused { return .account }
+      return !request.includesResources && needsResources(request) ? .resources : .ready
+    }
     if steamCMDSetup.isBusy || steamCMDSetup.selectedRuntime == nil { return .setup }
     if request.refused || Self.normalizedAccount(request.account).isEmpty { return .account }
-    // A sign-in downloads nothing, so shared resources never come into it.
-    if request.id == Self.signInRequestID { return .ready }
     if !request.includesResources, needsResources(request) { return .resources }
     return .ready
   }
@@ -437,6 +508,11 @@ final class WorkshopStore {
     if let item = downloadRequests.first(where: { $0.id == id })?.item { return item }
     if let item = downloader.downloads.first(where: { $0.item?.id == id })?.item { return item }
     return updates.available[id]
+  }
+
+  /// One item's current details from Steam's public endpoint, nil when Steam no longer serves it.
+  func lookUpItem(id: String) async throws -> WorkshopItem? {
+    try await service.details(ids: [id]).first { $0.id == id }
   }
 
   /// A running session pins the account every queued job reuses; a name typed elsewhere must
@@ -464,9 +540,8 @@ final class WorkshopStore {
   @discardableResult
   private func persistDownloadRequests() -> Bool {
     do {
-      let requests = downloadRequests.filter { $0.id != Self.signInRequestID }
       try FileManager.default.createDirectory(at: requestFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try JSONEncoder().encode(requests).write(to: requestFile, options: .atomic)
+      try JSONEncoder().encode(downloadRequests).write(to: requestFile, options: .atomic)
       downloadPersistenceError = nil
       return true
     } catch {
@@ -501,8 +576,20 @@ final class WorkshopStore {
     return persistDownloadRequests()
   }
 
+  /// The QR sign-in that serves `request`, when there is one.
+  private func nativeEngine(for request: WorkshopDownloadRequest) -> SteamNativeSession? {
+    guard let nativeSession, nativeSession.isSignedIn else { return nil }
+    return nativeSession
+  }
+
   private func resolve(_ request: WorkshopDownloadRequest, bridge: BridgeStore) {
-    guard stage(for: request) == .ready, let runtime = steamCMDSetup.selectedRuntime else {
+    let native = nativeEngine(for: request)
+    // Downloads never let SteamCMD update itself, and Steam stops accepting a client that falls
+    // behind, so a daily check against Valve's newest comes first. The request waits for it as
+    // for setup, and the prerequisite observer resumes it once the check is over.
+    if native == nil { steamCMDSetup.startUpdateCheck() }
+    let runtime = steamCMDSetup.selectedRuntime
+    guard stage(for: request) == .ready, native != nil || runtime != nil else {
       let previous = downloadRequests
       if upsert(request) {
         downloader.transferPausedToRequest(id: request.id)
@@ -512,29 +599,28 @@ final class WorkshopStore {
       }
       return
     }
-    if request.id == Self.signInRequestID {
-      downloader.signIn(
-        username: request.account, executable: runtime.executableURL,
-        root: ClientPaths.libraryURL.deletingLastPathComponent(),
-        rememberSession: request.rememberSession)
-    } else if let item = request.item {
+    if let item = request.item {
       // Shared assets are queued first and only once: other scenes ride the same job.
       if needsSharedAssets(item), !sharedAssetsPending {
-        installAssets(request, runtime: runtime)
+        installAssets(request, runtime: runtime, native: native)
       }
       // A wallpaper already in the library is being updated: its new files replace the old,
       // and a display showing it loads them again.
       let replacing = bridge.librarySnapshot.wallpapers.contains { $0.id == item.id }
-      downloader.start(
-        item: item, username: request.account, executable: runtime.executableURL,
-        library: ClientPaths.libraryURL, rememberSession: request.rememberSession
-      ) { [weak self] in
+      let imported: @MainActor () async throws -> Void = { [weak self] in
         try await self?.finishInstall(item: item, replacing: replacing, bridge: bridge)
       }
+      if let native {
+        downloader.startNative(item: item, session: native, library: ClientPaths.libraryURL, onImported: imported)
+      } else if let runtime {
+        downloader.start(
+          item: item, username: request.account, executable: runtime.executableURL,
+          library: ClientPaths.libraryURL, rememberSession: request.rememberSession, onImported: imported)
+      }
     } else {
-      installAssets(request, runtime: runtime)
+      installAssets(request, runtime: runtime, native: native)
     }
-    let started = request.id == Self.signInRequestID ? downloader.signIn : downloader.download(for: request.item?.id)
+    let started = downloader.download(for: request.item?.id)
     if let job = started, job.isPending {
       // Persist the started job before deleting its retained intent so a crash cannot lose both.
       downloadRequests.removeAll { $0.id == request.id }
@@ -548,16 +634,61 @@ final class WorkshopStore {
     }
   }
 
-  private func installAssets(_ request: WorkshopDownloadRequest, runtime: SteamCMDRuntime) {
+  /// SteamCMD ended a job before Steam accepted the sign-in and Steam said nothing about why,
+  /// which is how a SteamCMD Steam no longer accepts fails. Once no job runs, Valve's newest is
+  /// looked for without waiting for the daily check, and when a different SteamCMD was installed
+  /// every job that failed this way is tried again, once.
+  private func checkSteamCMD(after job: WorkshopDownload) {
+    guard !retriedAfterSteamCMDUpdate.contains(job.id) else { return }
+    awaitingSteamCMDCheck.insert(job.id)
+    runPendingSteamCMDCheck()
+  }
+
+  /// Jobs still running would end the same way if SteamCMD is to blame, so the check waits for
+  /// downloads to stop, however the last one ends; the prerequisite observer calls this then.
+  private func runPendingSteamCMDCheck() {
+    guard !awaitingSteamCMDCheck.isEmpty, !downloader.isRunning, !checkingSteamCMD else { return }
+    checkingSteamCMD = true
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      let updated = await self.updateSteamCMD(SteamCMDSetupStore.failureUpdateCheckInterval)
+      self.checkingSteamCMD = false
+      let failed = self.awaitingSteamCMDCheck
+      self.awaitingSteamCMDCheck = []
+      guard updated, let bridge = self.downloadBridge else { return }
+      for id in failed.sorted() {
+        guard let job = self.downloader.downloads.first(where: { $0.id == id }),
+          !job.isPending, !job.isPaused, !job.isCancelled, job.errorMessage != nil
+        else { continue }
+        self.retriedAfterSteamCMDUpdate.insert(id)
+        AppLog.info("Workshop download \(id): trying again after SteamCMD was updated")
+        self.continueDownload(
+          id: id, account: job.account, rememberSession: job.rememberSession,
+          includeResources: false, bridge: bridge)
+      }
+    }
+  }
+
+  private func installAssets(_ request: WorkshopDownloadRequest, runtime: SteamCMDRuntime?, native: SteamNativeSession?) {
     let destination = ClientPaths.managedAssetsURL
-    downloader.installAssets(
-      username: request.account, executable: runtime.executableURL,
-      destination: destination, rememberSession: request.rememberSession
-    ) {
+    let installed: @MainActor () throws -> Void = {
       try ClientPaths.configureAssetsFolder(at: destination)
       self.refreshSceneAssetsReadiness()
       if let bridge = self.downloadBridge { self.settleApplyIntentsAwaitingAssets(bridge: bridge) }
     }
+    if let native {
+      downloader.installAssetsNative(session: native, destination: destination, onInstalled: installed)
+    } else if let runtime {
+      downloader.installAssets(
+        username: request.account, executable: runtime.executableURL,
+        destination: destination, rememberSession: request.rememberSession, onInstalled: installed)
+    }
+  }
+
+  /// Takes back the QR sign-in saved by an earlier launch. The keychain is read off the main thread.
+  func restoreSteamQRSignIn() {
+    guard let nativeSession else { return }
+    Task { await nativeSession.restore() }
   }
 
   /// What follows a Workshop item arriving in the library: record it, rescan, load a replaced
@@ -684,17 +815,17 @@ final class WorkshopStore {
   static func normalizedAccount(_ account: String) -> String {
     account.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
   }
-  @ObservationIgnored private var searchTask: Task<Void, Never>?
+  @ObservationIgnored private(set) var searchTask: Task<Void, Never>?
   @ObservationIgnored private var generation = UUID()
   private(set) var committedQuery: WorkshopQuery?
   private(set) var failedRequest: WorkshopRequest?
-  /// Panel pages fetched for `cacheQuery`, keyed by page number, plus fetches still in
-  /// flight, so paging back never touches the network. A search always starts a fresh
-  /// cache, even for the same query.
+  /// Panel pages fetched for `cacheQuery`, keyed by page number, so paging back never touches
+  /// the network, plus fetches still in flight, keyed by their whole request. A search always
+  /// starts a fresh cache, even for the same query.
   @ObservationIgnored private var cacheQuery: WorkshopQuery?
   @ObservationIgnored private var cacheID = UUID()
   @ObservationIgnored private var steamPages: [Int: WorkshopPage] = [:]
-  @ObservationIgnored private var steamFetches: [Int: Task<WorkshopPage, Error>] = [:]
+  @ObservationIgnored private var steamFetches: [WorkshopRequest: Task<WorkshopPage, Error>] = [:]
   /// For panel pages filled from several Steam pages: the screened Steam pages, keyed by
   /// Steam's page number, with their fetches in flight, and where each panel page starts.
   @ObservationIgnored private var screenedPages: [Int: WorkshopPage] = [:]
@@ -713,9 +844,12 @@ final class WorkshopStore {
   @ObservationIgnored var onPreviewsAvailable: (@MainActor ([URL]) -> Void)?
 
   private var draftQuery: WorkshopQuery {
-    WorkshopQuery(
-      text: searchText.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind, sort: sort,
-      tags: tags, excludedTags: excludedTags, source: source)
+    let typed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    let translation = searchTranslation?.original == typed ? searchTranslation : nil
+    return WorkshopQuery(
+      text: translation?.english ?? typed, kind: kind, sort: sort,
+      tags: tags, excludedTags: excludedTags, source: source, favoritesOrder: favoritesOrder,
+      translation: translation)
   }
 
   /// The Steam page showing the current page's tiles.
@@ -732,16 +866,38 @@ final class WorkshopStore {
     case .collection(let id, _):
       return WorkshopItem.pageURL(id: id)
     case .creator(let id, _):
-      return WorkshopService.profileURL(steamID: id, subscriptions: false, page: page)
-    case .subscriptions:
-      return steamWebSession.map { WorkshopService.profileURL(steamID: $0.steamID, subscriptions: true, page: page) }
+      return WorkshopService.profileURL(steamID: id, list: .items, page: page)
+    case .subscriptions, .favorites:
+      let list: WorkshopProfileList =
+        query.source == .favorites ? .favorites(query.favoritesOrder) : .subscriptions
+      return steamWebSession.map { WorkshopService.profileURL(steamID: $0.steamID, list: list, page: page) }
         ?? URL(string: "https://steamcommunity.com/app/\(WorkshopApp.id)/workshop/")!
     }
   }
 
   func search() {
+    persistBrowseFilters()
     resetCache(for: draftQuery)
     load(WorkshopRequest(query: draftQuery, page: 1))
+  }
+
+  /// Takes back the sort and filters an earlier launch searched with. A stored value this build
+  /// cannot read, or one larger than a search accepts, leaves the defaults.
+  private func restoreBrowseFilters() {
+    guard let saved = defaults.dictionary(forKey: Self.browseFiltersKey) else { return }
+    if let raw = saved["sort"] as? String, let stored = WorkshopSort(rawValue: raw) { sort = stored }
+    let valid = { (list: [String], limit: Int) in list.count <= limit && list.allSatisfy { $0.count <= 128 } }
+    if let stored = saved["tags"] as? [String], let excluded = saved["excludedTags"] as? [String],
+      valid(stored, 32), valid(excluded, 64)
+    {
+      tags = stored
+      excludedTags = excluded
+    }
+  }
+
+  private func persistBrowseFilters() {
+    let value: [String: Any] = ["sort": sort.rawValue, "tags": tags, "excludedTags": excludedTags]
+    defaults.set(value, forKey: Self.browseFiltersKey)
   }
 
   /// Shows another source from its first page. An author or a collection is opened from what
@@ -751,7 +907,7 @@ final class WorkshopStore {
     case .creator, .collection:
       let current = committedQuery?.source ?? source
       if current != next { sourceHistory.append(current) }
-    case .browse, .collections, .subscriptions:
+    case .browse, .collections, .subscriptions, .favorites:
       sourceHistory = []
     }
     source = next
@@ -778,7 +934,7 @@ final class WorkshopStore {
         !self.isSigningInToSteamWeb
       else { return }
       self.steamWebSession = saved
-      if (self.committedQuery?.source ?? self.source) == .subscriptions { self.search() }
+      if self.source.isPersonal { self.search() }
     }
   }
 
@@ -797,18 +953,25 @@ final class WorkshopStore {
     webSessionRenewal?.cancel()
     webSessionRenewal = nil
     steamWebSession = session
-    if (committedQuery?.source ?? source) == .subscriptions { search() }
+    // Steam lists any page differently for the account, so what is on show is read again.
+    if source.isPersonal || committedQuery != nil || isLoading { search() }
     persist(session)
   }
 
   /// Forgets the Steam Community session, here and on this Mac; Steam's own sign-in window keeps
-  /// no cookie either.
-  func signOutOfSteamWeb() {
-    forgetSteamWebSession()
-    if (committedQuery?.source ?? source) == .subscriptions {
-      cancelSearch()
-      clearResults()
-    }
+  /// no cookie either. An account's own list that is loading is stopped, and one on show is
+  /// emptied, while another list already loading in its place goes on. Any other list on show
+  /// is read again as anyone sees it. Throws, still signed in with the list on show, when the
+  /// keychain keeps the saved session: the next launch would restore it.
+  func signOutOfSteamWeb() throws {
+    // First, so a session the keychain keeps stays signed in here too, list and all.
+    try webSessions?.remove()
+    dropSteamWebSession()
+    let loadsPersonal = source.isPersonal
+    let reads = committedQuery != nil || isLoading
+    if loadsPersonal { cancelSearch() }
+    if loadsPersonal || committedQuery?.source.isPersonal == true { clearResults() }
+    if !loadsPersonal && reads { search() }
   }
 
   /// Empties the grid, so nothing of an earlier list stays on show in place of one that
@@ -825,15 +988,75 @@ final class WorkshopStore {
     isDegraded = false
   }
 
+  /// Reads every id the signed-in account subscribes to, after a saved sign-in still being
+  /// restored, and answers the session it read with (nil when there was none). Signed out it
+  /// does nothing; Steam ending the session forgets it and throws `SteamSignInRequired`.
+  @discardableResult
+  func refreshSubscribedIDs() async throws -> SteamWebSession? {
+    var used: SteamWebSession?
+    subscriptionReads += 1
+    defer {
+      subscriptionReads -= 1
+      if subscriptionReads == 0 { editsDuringReads = [] }
+    }
+    do {
+      guard let session = try await currentSteamWebSession() else { return nil }
+      used = session
+      let start = editsDuringReads.count
+      let ids = try await service.subscribedIDs(account: session)
+      // A sign-out or another sign-in while Steam answered keeps what that set; a subscribe
+      // or unsubscribe made meanwhile is laid over what Steam sent.
+      if steamWebSession == session {
+        var marked = Set(ids)
+        for edit in editsDuringReads[start...] {
+          if edit.subscribed { marked.insert(edit.id) } else { marked.remove(edit.id) }
+        }
+        subscribedIDs = marked
+        subscriptionsReadFor = session.steamID
+      }
+      return session
+    } catch is SteamSignInRequired {
+      forgetSteamWebSession(endedWith: used)
+      throw SteamSignInRequired()
+    }
+  }
+
+  /// Subscribes the signed-in account to an item on Steam, or unsubscribes it, and marks what
+  /// Steam accepted. Without a session, or once Steam has ended it, throws `SteamSignInRequired`.
+  func setSubscribed(_ subscribed: Bool, itemID: String) async throws {
+    var used: SteamWebSession?
+    do {
+      guard let session = try await currentSteamWebSession() else { throw SteamSignInRequired() }
+      used = session
+      try await service.setSubscribed(subscribed, itemID: itemID, account: session)
+      if steamWebSession?.steamID == session.steamID {
+        if subscribed { subscribedIDs.insert(itemID) } else { subscribedIDs.remove(itemID) }
+        if subscriptionReads > 0 { editsDuringReads.append((itemID, subscribed)) }
+      }
+    } catch is SteamSignInRequired {
+      forgetSteamWebSession(endedWith: used)
+      throw SteamSignInRequired()
+    }
+  }
+
+  /// The newest comments on `item` from Steam's public thread; no sign-in is needed.
+  func comments(for item: WorkshopItem) async throws -> WorkshopComments {
+    guard let creator = item.creatorID else { return WorkshopComments(total: 0, comments: []) }
+    return try await service.comments(itemID: item.id, creatorID: creator)
+  }
+
   /// The ids of subscribed wallpapers not in `installed`, asking Steam for every page of
   /// subscriptions. Throws `SteamSignInRequired` when the session has ended.
   func missingSubscriptions(installed: Set<String>) async throws -> [WorkshopItem] {
+    var used: SteamWebSession?
     do {
       guard let session = try await currentSteamWebSession() else { throw SteamSignInRequired() }
+      used = session
       let ids = try await service.subscribedIDs(account: session).filter { !installed.contains($0) }
       return try await service.details(ids: ids).filter { $0.collectionSize == nil }
     } catch is SteamSignInRequired {
-      forgetSteamWebSession()
+      // Only the session Steam refused: a sign-in made while it answered stays.
+      forgetSteamWebSession(endedWith: used)
       throw SteamSignInRequired()
     }
   }
@@ -864,18 +1087,47 @@ final class WorkshopStore {
     }
   }
 
+  /// The session a page of `query` is read with. An account's own list needs one; any other is
+  /// read with the session when there is one, so Steam lists what it shows that account (the
+  /// age-rated items its preferences allow, as its region allows), and anonymously without.
+  /// A session Steam refuses to renew is forgotten and such a list read anonymously.
+  private func readingSession(for query: WorkshopQuery) async throws -> SteamWebSession? {
+    if query.source.isPersonal { return try await currentSteamWebSession() }
+    do {
+      return try await currentSteamWebSession()
+    } catch is SteamSignInRequired {
+      if let held = steamWebSession, held.needsRenewal(at: now()) { forgetSteamWebSession(endedWith: held) }
+      return nil
+    }
+  }
+
   /// Saves `session` for later launches. The store logs a failure.
   private func persist(_ session: SteamWebSession) {
     try? webSessions?.save(session)
   }
 
-  /// Drops the session, and the saved one with it.
+  /// Forgets `session` once Steam has ended it, unless another sign-in has replaced it since;
+  /// nil (no request had a session yet) forgets the current one.
+  private func forgetSteamWebSession(endedWith session: SteamWebSession?) {
+    guard session == nil || steamWebSession == session else { return }
+    forgetSteamWebSession()
+  }
+
+  /// Drops the session Steam ended, and the saved one with it.
   private func forgetSteamWebSession() {
+    dropSteamWebSession()
+    // Steam ended it, so a saved copy the keychain keeps signs no one in; the store logs why.
+    try? webSessions?.remove()
+  }
+
+  /// Drops the session here; the saved one is the caller's.
+  private func dropSteamWebSession() {
     webSessionRestore?.cancel()
     webSessionRenewal?.cancel()
     webSessionRenewal = nil
     steamWebSession = nil
-    webSessions?.remove()
+    subscribedIDs = []
+    subscriptionsReadFor = nil
   }
 
   func loadPage(_ page: Int) {
@@ -905,18 +1157,24 @@ final class WorkshopStore {
     }
   }
 
-  /// Starts, or joins, the fetch of one panel page for the current cache.
-  private func fetchSteamPage(_ number: Int, query: WorkshopQuery) -> Task<WorkshopPage, Error> {
-    if let task = steamFetches[number] { return task }
-    let cacheID = cacheID
+  /// Starts, or joins, the fetch of one panel page for the cache that asks, `cacheID`, which the
+  /// caller takes when the page is asked for. A cache replaced since gets nothing, so a request
+  /// made for an earlier search never reaches Steam or fills the new cache; and a fetch is only
+  /// joined by the same request, never by another query's page of the same number.
+  private func fetchSteamPage(_ request: WorkshopRequest, cacheID: UUID) -> Task<WorkshopPage, Error> {
+    guard cacheID == self.cacheID else { return Task { throw CancellationError() } }
+    if let task = steamFetches[request] { return task }
+    let (number, query) = (request.page, request.query)
     let service = service
     let task = Task { [weak self] in
-      defer { if let self, self.cacheID == cacheID { self.steamFetches[number] = nil } }
+      defer { if let self, self.cacheID == cacheID { self.steamFetches[request] = nil } }
       let result: WorkshopPage
       if Self.fillsPages(query), let self {
         result = try await self.filledPage(number, query: query, cacheID: cacheID)
       } else {
-        let account = query.source == .subscriptions ? try await self?.currentSteamWebSession() : nil
+        let account = try await self?.readingSession(for: query)
+        // Replaced while a saved sign-in or a renewal was awaited: Steam is not asked at all.
+        try Task.checkCancellation()
         result = try await service.page(for: query, page: number, account: account)
       }
       try Task.checkCancellation()
@@ -927,7 +1185,7 @@ final class WorkshopStore {
       }
       return result
     }
-    steamFetches[number] = task
+    steamFetches[request] = task
     return task
   }
 
@@ -1005,7 +1263,8 @@ final class WorkshopStore {
     let service = service
     let task = Task { [weak self] in
       defer { if let self, self.cacheID == cacheID { self.screenedFetches[number] = nil } }
-      let result = try await service.page(for: query, page: number, account: nil)
+      let account = try await self?.readingSession(for: query)
+      let result = try await service.page(for: query, page: number, account: account)
       try Task.checkCancellation()
       if let self, self.cacheID == cacheID { self.screenedPages[number] = result }
       return result
@@ -1016,7 +1275,7 @@ final class WorkshopStore {
 
   /// Steam's own `total_pages` is already clamped to 1,000; clamping again keeps the panel's
   /// page count within that limit whatever a page says, so no page beyond it is ever offered.
-  private func publish(_ result: WorkshopPage, for request: WorkshopRequest) {
+  private func publish(_ result: WorkshopPage, for request: WorkshopRequest, cacheID: UUID) {
     var seen = Set<String>()
     items = result.items.filter { seen.insert($0.id).inserted }
     totalCount = result.totalCount
@@ -1030,46 +1289,46 @@ final class WorkshopStore {
     failedRequest = nil
     // A failed prefetch is simply retried as an ordinary load when the user gets there.
     if prefetchesNextPage, page < totalPages, steamPages[page + 1] == nil {
-      _ = fetchSteamPage(page + 1, query: request.query)
+      _ = fetchSteamPage(WorkshopRequest(query: request.query, page: page + 1), cacheID: cacheID)
     }
   }
 
   private func load(_ request: WorkshopRequest) {
     searchTask?.cancel()
+    // A cache built for another query holds nothing this one can use.
     if cacheQuery != request.query { resetCache(for: request.query) }
-    generation = UUID()
+    let token = UUID()
+    generation = token
     errorMessage = nil
-    // A page already in the cache (paging back) never shows as loading.
+    // The cache this request is made for, taken now: a search that replaces it before the task
+    // below runs makes the request stale, and nothing of it reaches Steam or the new cache.
+    let cacheID = cacheID
+    // Paging back to a page already read shows it at once, never as loading.
     if let cached = steamPages[request.page] {
       isLoading = false
-      publish(cached, for: request)
+      publish(cached, for: request, cacheID: cacheID)
       return
     }
-    let requestID = generation
     isLoading = true
-    searchTask = Task {
+    searchTask = Task { [weak self] in
+      guard let self else { return }
+      defer { if self.generation == token { self.isLoading = false } }
       do {
-        let result = try await fetchSteamPage(request.page, query: request.query).value
-        guard generation == requestID, !Task.isCancelled else { return }
-        publish(result, for: request)
+        let result = try await self.fetchSteamPage(request, cacheID: cacheID).value
+        guard self.generation == token, !Task.isCancelled else { return }
+        self.publish(result, for: request, cacheID: cacheID)
       } catch {
-        guard generation == requestID, !Task.isCancelled else { return }
+        guard self.generation == token, !Task.isCancelled, !(error is CancellationError) else { return }
         AppLog.warn("Workshop \(request.query.source.key) page \(request.page) failed: \(error.localizedDescription)")
-        // No session, or Steam ended it: forget it and drop whatever list was on show, so the
-        // panel offers to sign in instead of leaving another list's tiles behind a Retry.
         if error is SteamSignInRequired {
-          forgetSteamWebSession()
-          clearResults()
-        } else if committedQuery?.source != request.query.source {
-          // Another list failed to open: the tiles on show belong to the list it was to replace,
-          // so they go too, rather than standing in for it and paging that list on Next.
-          clearResults()
+          // The session ended: drop it and the stale tiles, so the panel offers signing in again.
+          self.forgetSteamWebSession()
+          self.clearResults()
+        } else if self.committedQuery?.source != request.query.source {
+          self.clearResults()
         }
-        errorMessage = error.localizedDescription
-        failedRequest = request
-      }
-      if generation == requestID {
-        isLoading = false
+        self.errorMessage = error.localizedDescription
+        self.failedRequest = request
       }
     }
   }

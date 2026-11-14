@@ -90,6 +90,30 @@ final class TileDownloadStateTests: MediaPanelTestCase {
       state.label, "Ring fixture is waiting to download. Click to remove it from the queue")
   }
 
+  /// What a click on the ring does shows the same way for the pointer and for the keyboard.
+  func testARingWhoseClickCancelsShowsItsCrossWhenHoveredOrFocusedAndNoOtherRingEver() throws {
+    let cancelling = try [job(), job(progress: nil, queued: true)].map { try XCTUnwrap(ring(job: $0)) }
+    for state in cancelling {
+      XCTAssertEqual(state.action, .cancel)
+      XCTAssertTrue(state.showsClose(isHovering: true, isFocused: false), "under the pointer")
+      XCTAssertTrue(state.showsClose(isHovering: false, isFocused: true), "under keyboard focus")
+      XCTAssertTrue(state.showsClose(isHovering: true, isFocused: true))
+      XCTAssertFalse(state.showsClose(isHovering: false, isFocused: false), "at rest the centre shows")
+    }
+    let others = try [
+      DownloadRow(id: "a", title: "A", isPaused: true),
+      DownloadRow(id: "a", title: "A", errorMessage: "No."),
+      DownloadRow(id: "a", title: "A", isPending: true, prompt: .password),
+    ].map { try XCTUnwrap(ring(job: $0)) }
+    for state in others {
+      XCTAssertNotEqual(state.action, .cancel)
+      for (hovering, focused) in [(true, false), (false, true), (true, true), (false, false)] {
+        XCTAssertFalse(
+          state.showsClose(isHovering: hovering, isFocused: focused), "\(state.action) never shows a cross")
+      }
+    }
+  }
+
   func testAJobWaitingForSteamMarksTheTileAndReopensTheDialog() throws {
     for asking in [
       DownloadRow(id: "a", title: "A", isPending: true, prompt: .password),
@@ -124,8 +148,22 @@ final class TileDownloadStateTests: MediaPanelTestCase {
     let restored = DownloadRequestRow(id: "a", title: "A", stage: .setup, isPaused: true)
     let resume = try XCTUnwrap(ring(request: restored, job: nil))
     XCTAssertEqual(resume.kind, .queued)
-    XCTAssertEqual(resume.glyph, .play)
+    XCTAssertEqual(resume.glyph, .resume)
     XCTAssertEqual(resume.action, .resume)
+  }
+
+  /// A paused ring and a waiting one are both dim; only their marks tell them apart, and the paused
+  /// one draws the inspector's and the Downloads list's Resume download symbol, not Play's.
+  func testAPausedRingDrawsResumeDownloadsSymbolAndIsToldApartFromAWaitingOne() throws {
+    let paused = try XCTUnwrap(ring(job: DownloadRow(id: "a", title: "A", isPaused: true)))
+    let waiting = try XCTUnwrap(ring(job: job(progress: nil, queued: true)))
+    XCTAssertEqual(paused.kind, waiting.kind, "both are drawn dim")
+    let pausedMark = try XCTUnwrap(paused.glyph).systemImage
+    XCTAssertNotEqual(pausedMark, try XCTUnwrap(waiting.glyph).systemImage)
+    XCTAssertEqual(pausedMark, DownloadRowAction.resume.systemImage)
+    XCTAssertNotEqual(pausedMark, "play.fill")
+    let failed = try XCTUnwrap(ring(job: DownloadRow(id: "a", title: "A", errorMessage: "No.")))
+    XCTAssertEqual(try XCTUnwrap(failed.glyph).systemImage, DownloadRowAction.retry.systemImage)
   }
 
   func testAFailedOrCancelledDownloadOffersRetryOnlyOnceSteamCMDIsReady() throws {

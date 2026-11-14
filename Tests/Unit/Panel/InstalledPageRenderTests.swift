@@ -171,15 +171,71 @@ final class InstalledPageRenderTests: PanelTestCase {
     named.close()
   }
 
+  func testTheLibraryViewsAndPlayKeepTheirPlacesInTheNarrowestColumnInEveryLanguage() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    try await prepare(panel)
+    let model = panel.controller.library
+    let night = try panel.collections.create(
+      name: "Wallpapers for a long night in the mountains", wallpaperIDs: ["item3", "item4"])
+    model.show(.collection(night.id))
+    // The narrowest page column: the smallest window with the inspector opened beside it, by choice.
+    let shell = panel.controller.shell
+    shell.windowWidthChanged(.compact)
+    shell.toggleInspector()
+    XCTAssertTrue(shell.isInspectorShown)
+    PanelLocale.shared.bind(to: panel.controller.appLanguage)
+    let controls = ["scope-all", "scope-favorites", "scope-collection", "scope-play", "scope-play-order"]
+    for language in AppLanguage.supported.map(\.tag) {
+      try panel.controller.appLanguage.set(language)
+      let size = Self.sizes[0]
+      let hosted = HostedPanel(panel, size: size)
+      try await hosted.settle(0.5)
+      hosted.layout(at: size)
+      try await hosted.settle(0.3)
+      assertFits(hosted, size, "views, \(language)")
+      let view = hosted.hosting.view
+      let bounds = hosted.window.convertToScreen(view.convert(view.bounds, to: nil))
+      var frames: [String: NSRect] = [:]
+      for identifier in controls {
+        let frame = try XCTUnwrap(element(identifier, in: view), "\(language): \(identifier)").frame
+        XCTAssertFalse(frame.isEmpty, "\(language): \(identifier) is drawn")
+        XCTAssertTrue(
+          bounds.insetBy(dx: -1, dy: -1).contains(frame), "\(language): \(identifier) inside the window")
+        for (other, placed) in frames {
+          XCTAssertFalse(
+            frame.insetBy(dx: 0.5, dy: 0.5).intersects(placed), "\(language): \(identifier) over \(other)")
+        }
+        frames[identifier] = frame
+      }
+      XCTAssertGreaterThanOrEqual(
+        frames["scope-collection"]?.width ?? 0, 96, "\(language): the collection keeps a readable name")
+      XCTAssertTrue(
+        element("scope-collection", in: view)?.help?.contains(night.name) == true,
+        "\(language): the collection's tooltip reads the whole name its chip may cut short")
+      if language != "en" {
+        XCTAssertNotEqual(
+          element("scope-all", in: view)?.label, "All wallpapers", "\(language): the chip follows the language")
+      }
+      hosted.close()
+    }
+  }
+
   func testEveryEmptyStateFitsTheNarrowestWindowInEveryLanguage() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
     try await prepare(panel)
     let model = panel.controller.library
     PanelLocale.shared.bind(to: panel.controller.appLanguage)
+    let quiet = try panel.collections.create(name: "Quiet", wallpaperIDs: [])
     let states: [() -> Void] = [
+      { model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108") },
       { model.setText("zzz") }, { model.setRequired("Customizable", true) },
       { model.setRequired("Customizable", false); model.setText("") },
+      {
+        model.show(.collection(quiet.id))
+        XCTAssertEqual(model.emptyState, .emptyCollection(name: "Quiet"))
+      },
     ]
     for language in AppLanguage.supported.map(\.tag) {
       try panel.controller.appLanguage.set(language)
@@ -190,6 +246,7 @@ final class InstalledPageRenderTests: PanelTestCase {
         assertFits(hosted, Self.sizes[0], "empty, \(language)")
         hosted.close()
       }
+      // Clears the collection too, so the next language starts from every wallpaper.
       model.clearSearchAndFilters()
     }
     let empty = try makeController()
@@ -222,6 +279,8 @@ final class InstalledPageRenderTests: PanelTestCase {
     var identifier: String? { string("accessibilityIdentifier") }
     var role: String? { string("accessibilityRole") }
     var label: String? { string("accessibilityLabel") }
+    /// The tooltip, which SwiftUI also gives assistive apps.
+    var help: String? { string("accessibilityHelp") }
     var value: Any? {
       object.responds(to: NSSelectorFromString("accessibilityValue"))
         ? object.value(forKey: "accessibilityValue") : nil
@@ -250,6 +309,26 @@ final class InstalledPageRenderTests: PanelTestCase {
 
   private func element(_ identifier: String, in view: NSView) -> Element? {
     accessibilityElements(in: view).first { $0.identifier == identifier }
+  }
+
+  func testTheFirstReadOfTheLibraryIsSaidOnceByTheGrid() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    panel.show()
+    let model = panel.controller.library
+    XCTAssertEqual(model.emptyState, .loading, "the library has not been read yet")
+    let hosted = HostedPanel(panel, size: Self.sizes[0])
+    try await hosted.settle(0.3)
+    XCTAssertEqual(model.emptyState, .loading, "still being read while the page is looked at")
+    XCTAssertNotNil(
+      element("installed-empty", in: hosted.hosting.view), "the grid says the library is being read")
+    XCTAssertNil(
+      element("installed-summary", in: hosted.hosting.view), "the bar under the grid does not say it again")
+    XCTAssertEqual(
+      AccessibilityElement.systemProgressIndicators(in: hosted.hosting.view), [],
+      "the grid's ring stops in a hidden window and with Reduce Motion; a system spinner would not")
+    assertFits(hosted, Self.sizes[0], "loading")
+    hosted.close()
   }
 
   func testTheActivePillSaysActiveInTheCornerAndMovesPastTheCheckOnlyWhileItShows() async throws {
@@ -419,7 +498,7 @@ final class InstalledPageRenderTests: PanelTestCase {
           filters.width, FilterSidebar.width + FilterSidebar.inset, accuracy: 1,
           "filters, \(language)")
         let importing = try await popoverSize(ImportPopover(), panel, dark: dark)
-        XCTAssertEqual(importing.width, 320, accuracy: 1, "import, \(language)")
+        XCTAssertEqual(importing.width, ImportPopover.width, accuracy: 1, "import, \(language)")
         XCTAssertLessThanOrEqual(importing.height, 520)
       }
     }

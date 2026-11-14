@@ -46,7 +46,7 @@ struct SettingsSegmentedControl<Value: Hashable>: View {
     .fixedSize(horizontal: !fillsWidth, vertical: false)
     .padding(2)
     .background(theme.surface.hover.color, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .opacity(isEnabled ? 1 : 0.5)
+    .panelDisabledOpacity(isEnabled)
     .accessibilityElement(children: .contain)
   }
 }

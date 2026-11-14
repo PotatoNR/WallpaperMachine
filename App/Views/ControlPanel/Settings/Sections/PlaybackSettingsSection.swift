@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Settings › Playback & Power: when wallpapers pause, mute or stop on their own, and how they
-/// behave on battery, in Low Power Mode, when the Mac is hot, under a Focus and beside other apps.
+/// behave on battery, in Low Power Mode, when the Mac is hot or inactive, under a Focus and beside
+/// other apps.
 struct PlaybackSettingsSection: View {
   private static let playback = SettingsItem.Group("playback", title: "Playback")
   private static let context = SettingsItem.Group("context")
@@ -17,7 +18,7 @@ struct PlaybackSettingsSection: View {
     id: "playback.desktop-covered", section: .playback, group: playback,
     title: "When windows cover the desktop",
     note:
-      "Covered means windows hide everything but the menu bar and the screen edges. Pause keeps the last frame there. Wallpapers you can’t see at all always pause."
+      "Covered means windows hide everything but the menu bar and the screen edges. Pause keeps the last frame there. Mute and Reduce volume keep wallpapers playing and change only their sound, once windows cover every display that shows one. Wallpapers you can’t see at all always pause."
   )
   static let activeDisplayOnly = SettingsItem(
     id: "playback.active-display-only", section: .playback, group: playback,
@@ -31,12 +32,33 @@ struct PlaybackSettingsSection: View {
     note:
       "Mute silences scene and video wallpapers, and Web wallpapers when page-output mute is available. Pause applies to every wallpaper."
   )
+  static let otherAudioVolume = SettingsItem(
+    id: "playback.other-audio-volume", section: .playback, group: playback,
+    title: "Reduce volume to",
+    note:
+      "Each wallpaper plays at this share of its own volume while windows cover the desktop or another app plays sound, whichever you set to Reduce volume; its saved volume is not changed. In Web wallpapers it reaches only the audio and video played through media elements."
+  )
+  static let otherAppInFront = SettingsItem(
+    id: "playback.other-app-in-front", section: .playback, group: playback,
+    title: "When another app is in front",
+    note:
+      "Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound. Pause on battery applies only on battery: the wallpaper holds its last frame and plays again when you click the desktop or plug in your Mac."
+  )
   static let displaySleep = SettingsItem(
     id: "playback.display-sleep", section: .playback, group: playback,
     title: "When displays sleep",
     note:
       "Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded."
   )
+  static let inactivity = SettingsItem(
+    id: "playback.inactivity", section: .playback, group: playback,
+    title: "When the Mac is inactive",
+    note:
+      "Inactive means no keyboard, mouse or trackpad input for the time you choose. Wallpapers resume at your next input."
+  )
+  static let inactivityTime = SettingsItem(
+    id: "playback.inactivity-time", section: .playback, group: playback,
+    title: "Inactive after")
   static let batteryMode = SettingsItem(
     id: "playback.battery-mode", section: .playback, group: playback, title: "On battery",
     note:
@@ -96,19 +118,25 @@ struct PlaybackSettingsSection: View {
     title: "What these settings change")
 
   static let items = [
-    muteAll, desktopCovered, activeDisplayOnly, otherAudio, displaySleep, batteryMode, batteryScale,
+    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAudioVolume, otherAppInFront, displaySleep,
+    inactivity,
+    inactivityTime, batteryMode, batteryScale,
     batteryFps, reducedQuality, lowBattery, lowBatteryLevel, lowPowerMode, thermal, focus, appRules,
     addAppRule, whatChanges,
   ]
 
   /// The rows this page leaves out now, by the rules its body draws them with: "Only play on the
-  /// display I'm using" needs two displays (or is on), the reduced profile needs a Reduced quality
-  /// choice, and the low-battery rows need a battery (the level also a rule that does something).
+  /// display I'm using" needs two displays (or is on), the reduced volume needs Reduce volume to
+  /// be the choice for a covered desktop or other-app sound, the time without input needs an inactivity
+  /// rule that does something, the reduced profile needs a Reduced quality choice, and the
+  /// low-battery rows need a battery (the level also a rule that does something).
   @MainActor
   static func unofferedItems(_ controller: PanelController) -> Set<String> {
     let playback = controller.playbackSettings
     var hidden: [SettingsItem] = []
     if !playback.showsActiveDisplayOnly { hidden.append(activeDisplayOnly) }
+    if !playback.showsOtherAudioVolume { hidden.append(otherAudioVolume) }
+    if !playback.showsInactivityTime { hidden.append(inactivityTime) }
     if !controller.qualityReport.reducedQualityChosen {
       hidden += [batteryScale, batteryFps, reducedQuality]
     }
@@ -132,6 +160,10 @@ struct PlaybackSettingsSection: View {
             options: DesktopCoveredAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setDesktopCoveredAction($0) }
         }
+        // One level for both rows that can turn wallpapers down, under the first that does.
+        if playback.showsOtherAudioVolume, playback.reducedVolumeFollowsDesktopCovered {
+          reducedVolumeRow(playback)
+        }
         if playback.showsActiveDisplayOnly {
           SettingsRow(Self.activeDisplayOnly) {
             SettingsSwitchControl(key: .playOnlyOnActiveDisplay)
@@ -143,11 +175,36 @@ struct PlaybackSettingsSection: View {
             options: OtherAudioAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setOtherAudioAction($0) }
         }
+        if playback.showsOtherAudioVolume, !playback.reducedVolumeFollowsDesktopCovered {
+          reducedVolumeRow(playback)
+        }
+        SettingsRow(Self.otherAppInFront, note: playback.otherAppInFrontNote) {
+          menu(
+            "otherAppInFrontAction", saved: playback.otherAppInFrontAction,
+            options: OtherAppInFrontAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setOtherAppInFrontAction($0) }
+        }
         SettingsRow(Self.displaySleep) {
           menu(
             "displaySleepAction", saved: playback.displaySleepAction,
             options: DisplaySleepAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setDisplaySleepAction($0) }
+        }
+        SettingsRow(Self.inactivity, note: playback.inactivityNote) {
+          menu(
+            "inactivityAction", saved: playback.inactivityAction,
+            options: InactivityAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setInactivityAction($0) }
+        }
+        if playback.showsInactivityTime {
+          SettingsRow(Self.inactivityTime) {
+            menu(
+              "inactivityMinutes", saved: playback.inactivityMinutes,
+              options: PlaybackPreferences.inactivityMinuteChoices.map {
+                ($0, InactivityAction.timeTitle(minutes: $0))
+              }
+            ) { try await controller.setInactivityMinutes($0) }
+          }
         }
         SettingsRow(Self.batteryMode) {
           menu(
@@ -205,6 +262,17 @@ struct PlaybackSettingsSection: View {
     .onAppear { controller.refreshSystemReadings() }
   }
 
+  /// The share of its own volume each wallpaper keeps wherever Reduce volume is the choice.
+  private func reducedVolumeRow(_ playback: PlaybackSettings) -> some View {
+    SettingsRow(Self.otherAudioVolume) {
+      // A percentage reads the same in every language.
+      SettingsSliderControl(
+        key: "otherAudioVolume", saved: playback.otherAudioVolume,
+        range: PlaybackPreferences.otherAudioVolumeRange, readout: { "\($0)%" }
+      ) { try await controller.setOtherAudioVolume($0) }
+    }
+  }
+
   /// The render scale and frame rate every Reduced quality choice shares, and which reason is
   /// holding quality down now.
   @ViewBuilder
@@ -250,20 +318,26 @@ struct PlaybackSettingsSection: View {
     menu(key, saved: saved, options: SystemConditionAction.allCases.map { ($0, $0.title) }, perform: perform)
   }
 
-  /// What the settings above do, in thirteen short paragraphs.
+  /// What the settings above do, in fifteen short paragraphs.
   private var context: some View {
     SettingsProse {
       Text(
-        "Wallpapers you can’t see, such as behind a full-screen app, pause on their own. When windows cover the desktop, Pause keeps the last frame and Keep running keeps it moving in the gaps."
+        "Wallpapers you can’t see, such as behind a full-screen app, pause on their own. When windows cover the desktop, Pause keeps the last frame, Mute and Reduce volume keep it moving silenced or quieter, and Keep running keeps it moving in the gaps."
       )
       Text(
         "With two or more displays, Only play on the display I’m using pauses the others a few seconds after your pointer leaves them."
       )
       Text(
-        "When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+        "When another app plays sound, Reduce volume plays each wallpaper at the share of its own volume you chose, and Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+      )
+      Text(
+        "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app. Pause on battery does the same only while the Mac runs on battery, and plugging in ends it."
       )
       Text(
         "When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes."
+      )
+      Text(
+        "When the Mac is inactive, wallpapers pause or stop once there has been no keyboard, mouse or trackpad input for the time you chose, and resume at your next input. Your own Play and Pause are not changed."
       )
       Text(
         "On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving."
@@ -281,16 +355,16 @@ struct PlaybackSettingsSection: View {
         "In Low Power Mode, when the Mac is hot or when the battery is low, Reduced quality keeps wallpapers running at the lower render scale and frame rate instead of pausing them, and never goes above your own quality settings. If the Mac gets very hot, wallpapers pause instead. It promises no measured power saving."
       )
       Text(
-        "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps every display without rewriting the frame rate saved for each wallpaper. Internal render scale sets how many pixels are rendered before the image is scaled to fit."
-      )
-      Text(
-        "Video playback picks a backend for each wallpaper. Native is used only for videos it supports; the rest play in Compatibility."
+        "A quality preset sets the frame-rate limit and render scale together. The frame-rate limit caps scenes and web wallpapers on every display without rewriting the frame rate saved for each wallpaper; a video plays at its own frame rate. Internal render scale sets how many pixels are rendered before the image is scaled to fit."
       )
       Text(
         "Scene render optimisation reuses work inside a scene and produces the same picture. It only affects scene wallpapers."
       )
       Text(
-        "Content pacing, shared video decode and direct video plane sampling are experimental. Shared decode merges only the decoding; each screen still draws its own frames. Direct plane sampling skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
+        "Direct video plane sampling is experimental. It skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
+      )
+      Text(
+        "Draw only the visible part of cropped scenes is experimental. It skips the part of a 2D scene your display crops off, so a few pixels can look very slightly different."
       )
     }
   }

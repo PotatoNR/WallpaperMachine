@@ -90,6 +90,42 @@ final class InspectorRenderTests: InspectorTestCase {
     await fixture.shutdown()
   }
 
+  /// The footer with Revert and Apply changes and the Not applied marks are drawn only while an
+  /// edit waits, so the test above never meets them: with a property and a display's scale factor
+  /// waiting, the inspector still takes the smallest window it is given in every language and both
+  /// appearances, footer and marks included.
+  func testTheInspectorWithChangesWaitingAcceptsTheWindowInEveryLanguage() async throws {
+    let fixture = try InspectorRenderFixture()
+    try await prepare(fixture)
+    fixture.store.wallpaperOptionsSnapshot?.dirty = true
+    fixture.store.wallpaperOptionsSnapshot?.properties[1].staged = true
+    fixture.store.wallpaperOptionsSnapshot?.displayConfigurations[1].staged = true
+    let waiting = fixture.controller.inspectorOptions(for: InspectorRenderFixture.selected)
+    XCTAssertEqual(
+      waiting?.properties.first { $0.id == "clock" }?.mark, .notApplied, "precondition: the switch waits")
+    XCTAssertEqual(waiting?.displays.map(\.hasStagedChanges), [false, true], "and the second display")
+    let size = ControlPanelWindow.minimumContentSize
+    for language in AppLanguage.supported.map(\.tag) {
+      let languages = AppLanguageStore(
+        defaults: TemporaryDefaults.makeForCurrentTest().defaults, systemLanguages: [language])
+      PanelLocale.shared.bind(to: languages)
+      for dark in [false, true] {
+        let (window, hosting) = windowHosting(fixture, size: size, dark: dark)
+        try await settle()
+        hosting.view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(
+          identifiers(in: hosting.view).isSuperset(of: ["inspector.revert", "inspector.applyChanges"]),
+          "\(language): the footer is drawn while an edit waits")
+        XCTAssertLessThanOrEqual(
+          hosting.sizeThatFits(in: size).width, size.width + 1,
+          "\(language) \(dark ? "dark" : "light"): the footer must not ask for more width")
+        window.contentViewController = nil
+        window.close()
+      }
+    }
+    await fixture.shutdown()
+  }
+
   func testTheEmptyInspectorAsksForASelectionInTheWindowToo() async throws {
     let fixture = try InspectorRenderFixture()
     fixture.store.appSnapshot.selectedWallpaperId = nil
@@ -141,6 +177,129 @@ final class InspectorRenderTests: InspectorTestCase {
       }
       window.contentViewController = nil
       window.close()
+    }
+    await fixture.shutdown()
+  }
+
+  /// The Compatibility card once the runtime reports the video's player with a problem: the line it
+  /// leads with and the renderer's id beneath wrap inside the narrowest inspector column in every
+  /// shipped language and both appearances, rather than asking for more width.
+  func testTheCompatibilityCardsRendererLinesWrapInTheNarrowestColumnInEveryLanguage() async throws {
+    let fixture = try InspectorRenderFixture(selecting: .video)
+    try await prepare(fixture)
+    let controller = fixture.controller
+    controller.navigation.targetDisplayID = "primary"
+    let reason = "the project's video file could not be found"
+    // The bridge reports by live display id: "Studio Display (1 - Primary)" is display 1.
+    fixture.store.settingsSnapshot.videoBackends = [
+      BridgeVideoBackendReport(
+        displayId: 1, displayName: "Studio Display", wallpaperId: InspectorRenderFixture.selected,
+        wallpaperTitle: "Aurora", backend: "native", fallbackReason: reason)
+    ]
+    let state = try XCTUnwrap(controller.compatibilityState)
+    XCTAssertEqual(state.fallbackReason, reason, "precondition: the report carries its problem")
+    XCTAssertNotNil(
+      InspectorWording.backendLine(state)?.detail, "precondition: the renderer's lines, not the note")
+    let row = try XCTUnwrap(controller.libraryRows.first { $0.id == InspectorRenderFixture.selected })
+    // The inspector draws its cards 16 points in from either edge of its column.
+    let inner = InspectorColumn<EmptyView>.widths.lowerBound - 2 * 16
+    for language in AppLanguage.supported.map(\.tag) {
+      let languages = AppLanguageStore(
+        defaults: TemporaryDefaults.makeForCurrentTest().defaults, systemLanguages: [language])
+      PanelLocale.shared.bind(to: languages)
+      for dark in [false, true] {
+        let hosting = NSHostingController(
+          rootView: AnyView(
+            CompatibilityCard(state: state, row: row)
+              .environment(controller)
+              .environment(\.panelImages, controller.images)
+              .environment(\.panelIsVisible, true)
+              .panelTheme(theme: controller.theme, locale: PanelLocale.shared)))
+        hosting.sizingOptions = []
+        let window = NSWindow(
+          contentRect: NSRect(x: 0, y: 0, width: inner, height: 600), styleMask: [.titled],
+          backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hosting
+        hosting.view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        window.layoutIfNeeded()
+        hosting.view.layoutSubtreeIfNeeded()
+        let measured = hosting.sizeThatFits(in: NSSize(width: inner, height: 2000))
+        XCTAssertLessThanOrEqual(
+          measured.width, inner + 1,
+          "\(language) \(dark ? "dark" : "light"): the card wraps its lines in the column")
+        XCTAssertGreaterThan(measured.height, 0, "\(language): the card was drawn")
+        window.contentViewController = nil
+        window.close()
+      }
+    }
+    await fixture.shutdown()
+  }
+
+  /// The quiet buttons of the Presets and Collections cards set the accent button's type at its
+  /// size, so the narrowest inspector column must hold their whole words in every language: a
+  /// chosen preset's Apply beside the menu, Delete and Cancel under a preset's Delete…, the name
+  /// form's Save preset or Save with Cancel, and a new collection's Create with Cancel. Each is
+  /// drawn as wide in that column as it is with all the room it wants, so none is cut short.
+  func testThePresetAndCollectionButtonsKeepTheirWholeWordsInTheNarrowestColumnInEveryLanguage()
+    async throws
+  {
+    let fixture = try InspectorRenderFixture()
+    try await prepare(fixture)
+    let id = InspectorRenderFixture.selected
+    // The Collections card opens by itself for a wallpaper that is in a collection.
+    try await fixture.controller.createCollection(name: "Evenings by the sea", wallpaperIDs: [id])
+    let preset = PresetsState.Item(id: "evening", name: "Evening glow over the harbour")
+    let presets = PresetsState(
+      wallpaperID: id, items: [preset], isDirty: false, canSave: true, status: nil, error: nil)
+    var chosen = PresetsBarState()
+    chosen.pick(preset.id)
+    var deleting = chosen
+    deleting.beginDelete(of: preset)
+    var saving = chosen
+    saving.beginSave()
+    var renaming = chosen
+    renaming.beginRename(of: preset)
+    let cards: [(name: String, buttons: [String], card: AnyView)] = [
+      ("a chosen preset", ["Apply"], AnyView(PresetsCard(state: presets, bar: chosen))),
+      ("Delete…", ["Delete", "Cancel"], AnyView(PresetsCard(state: presets, bar: deleting))),
+      ("Save current…", ["Save preset", "Cancel"], AnyView(PresetsCard(state: presets, bar: saving))),
+      ("Rename…", ["Save", "Cancel"], AnyView(PresetsCard(state: presets, bar: renaming))),
+      ("New collection…", ["Create", "Cancel"], AnyView(CollectionsCard(wallpaperID: id, isNaming: true))),
+    ]
+    // The inspector draws its cards 16 points in from either edge of its column.
+    let inner = InspectorColumn<EmptyView>.widths.lowerBound - 2 * 16
+    /// The width of each button of `card` named in `names`, drawn `width` points wide.
+    func buttons(_ card: AnyView, names: [String], width: CGFloat) async throws -> [String: CGFloat] {
+      let (window, view) = fixture.host(size: NSSize(width: width, height: 640)) { card }
+      try await settle()
+      view.layoutSubtreeIfNeeded()
+      var found: [String: CGFloat] = [:]
+      for element in AccessibilityElement(object: view).all()
+      where element.role == NSAccessibility.Role.button.rawValue && names.contains(element.label) {
+        found[element.label] = element.frame.width
+      }
+      window.contentView = nil
+      window.close()
+      return found
+    }
+    for language in AppLanguage.supported.map(\.tag) {
+      let languages = AppLanguageStore(
+        defaults: TemporaryDefaults.makeForCurrentTest().defaults, systemLanguages: [language])
+      PanelLocale.shared.bind(to: languages)
+      for (name, keys, card) in cards {
+        let names = keys.map { L(String.LocalizationValue($0)) }
+        let drawn = try await buttons(card, names: names, width: inner)
+        let roomy = try await buttons(card, names: names, width: 1000)
+        XCTAssertEqual(Set(drawn.keys), Set(names), "\(language) \(name): every button is drawn")
+        for label in names {
+          let wanted = try XCTUnwrap(roomy[label], "\(language) \(name): \(label)")
+          XCTAssertGreaterThan(wanted, 2 * 14, "\(language) \(name): \(label)'s words are measured")
+          XCTAssertGreaterThanOrEqual(
+            drawn[label] ?? 0, wanted - 0.5,
+            "\(language) \(name): \(label) is cut short in the narrowest column")
+        }
+      }
     }
     await fixture.shutdown()
   }
@@ -302,6 +461,50 @@ final class InspectorRenderTests: InspectorTestCase {
     window.close()
   }
 
+  /// A switch with Restore default beside it keeps its line whichever mark its row shows, none,
+  /// Modified or Not applied: at every width of the column the row is as tall in all three, so the
+  /// first edit, an Apply or a Revert never moves the switch from beside its label to under it.
+  func testASwitchStaysOnItsLineWhetherItsRowShowsNoMarkModifiedOrNotApplied() async throws {
+    let fixture = try InspectorRenderFixture()
+    var inputs = InspectorOptions.Inputs()
+    inputs.locale = PanelLocale(language: .english, region: nil)
+    func row(dirty: Bool, staged: Bool) throws -> NSHostingController<AnyView> {
+      let options = InspectorOptions.make(
+        BridgeSnapshotFixtures.options(
+          wallpaperId: InspectorRenderFixture.selected,
+          properties: [
+            BridgePropertyDescriptor(
+              id: "clock", kind: .bool, labelHtml: "Show the clock", value: .bool(value: true),
+              defaultValue: .bool(value: false), slider: nil, comboOptions: [], fileFilter: nil,
+              directoryMode: nil, dirty: dirty, canRestoreDefaults: true, enabled: true,
+              assetManaged: false, assetMissing: false, assetSourcePath: nil, staged: staged)
+          ]), inputs: inputs)
+      let row = try XCTUnwrap(options.properties.first)
+      XCTAssertTrue(row.canRestoreDefault, "precondition: Restore default follows the mark")
+      return NSHostingController(
+        rootView: AnyView(
+          PropertyRowView(options: options, row: row)
+            .environment(fixture.controller)
+            .panelTheme(theme: fixture.controller.theme, locale: PanelLocale.shared)))
+    }
+    let states = [
+      ("no mark", try row(dirty: false, staged: false)), ("Modified", try row(dirty: true, staged: false)),
+      ("Not applied", try row(dirty: true, staged: true)),
+    ]
+    // From a column wide enough for the label to keep one line under any mark (narrower, a wider
+    // mark leaves the label less room and it wraps, which is not the switch moving).
+    var heights = Set<CGFloat>()
+    for width in stride(from: CGFloat(240), through: 420, by: 1) {
+      let measured = states.map { ($0.0, $0.1.sizeThatFits(in: CGSize(width: width, height: 2000)).height) }
+      heights.formUnion(measured.map(\.1))
+      for (name, height) in measured.dropFirst() {
+        XCTAssertEqual(height, measured[0].1, accuracy: 0.5, "\(name) at \(width) pt: the switch changed lines")
+      }
+    }
+    XCTAssertGreaterThan(heights.count, 1, "precondition: the sweep crosses the width where the switch moves")
+    await fixture.shutdown()
+  }
+
   // MARK: VoiceOver
 
   /// What a test hears in place of VoiceOver.
@@ -323,12 +526,52 @@ final class InspectorRenderTests: InspectorTestCase {
     return found
   }
 
-  /// The footer's sentence is a status line, as the page's was: the edit that leaves something to
-  /// apply is said aloud, not only drawn.
-  func testTheFooterSaysAloudThatAnEditLeftSomethingToApply() async throws {
+  /// Every element of the accessibility tree below `root`, read by key as `identifiers(in:)` reads
+  /// them.
+  private func accessibilityObjects(in root: NSView) -> [NSObject] {
+    var found: [NSObject] = []
+    func walk(_ element: Any?, depth: Int) {
+      guard depth < 60, let object = element as? NSObject else { return }
+      found.append(object)
+      if object.responds(to: NSSelectorFromString("accessibilityChildren")),
+        let children = object.value(forKey: "accessibilityChildren") as? [Any]
+      {
+        for child in children { walk(child, depth: depth + 1) }
+      }
+    }
+    walk(root, depth: 0)
+    return found
+  }
+
+  /// The accessibility identifiers of the controls drawn below `root`, which say which controls the
+  /// inspector really drew. SwiftUI's elements answer the informal protocol, so they are read by key.
+  private func identifiers(in root: NSView) -> Set<String> {
+    var found = Set<String>()
+    func walk(_ element: Any?, depth: Int) {
+      guard depth < 60, let object = element as? NSObject else { return }
+      if object.responds(to: NSSelectorFromString("accessibilityIdentifier")),
+        let identifier = object.value(forKey: "accessibilityIdentifier") as? String, !identifier.isEmpty
+      {
+        found.insert(identifier)
+      }
+      if object.responds(to: NSSelectorFromString("accessibilityChildren")),
+        let children = object.value(forKey: "accessibilityChildren") as? [Any]
+      {
+        for child in children { walk(child, depth: depth + 1) }
+      }
+    }
+    walk(root, depth: 0)
+    return found
+  }
+
+  /// Revert and Apply changes are drawn only while an edit waits, and the footer's sentence is a
+  /// status line, as the page's was: the edit that leaves something to apply is said aloud, not only
+  /// drawn, once each time it happens.
+  func testTheFooterIsDrawnAndSaidAloudOnlyWhileAnEditWaits() async throws {
     let fixture = try InspectorRenderFixture()
     try await prepare(fixture)
     let sentence = "You have unapplied changes."
+    let footer: Set<String> = ["inspector.revert", "inspector.applyChanges"]
     let heard = Heard()
     let (window, view) = fixture.host(size: NSSize(width: 360, height: 1400)) {
       InstalledInspector().environment(\.panelAnnouncer, PanelAnnouncer { heard.lines.append($0) })
@@ -336,14 +579,155 @@ final class InspectorRenderTests: InspectorTestCase {
     try await settle(600)
     view.layoutSubtreeIfNeeded()
     XCTAssertEqual(fixture.controller.inspectorOptions(for: InspectorRenderFixture.selected)?.hasChanges, false)
+    XCTAssertTrue(identifiers(in: view).contains("inspector.apply"), "the options and the header are drawn")
+    XCTAssertTrue(identifiers(in: view).isDisjoint(with: footer), "nothing to apply yet, so no footer")
     XCTAssertFalse(heard.lines.contains(sentence), "nothing to apply yet")
 
     fixture.store.wallpaperOptionsSnapshot?.dirty = true
     try await fixture.panel.waitUntil(timeout: 5) {
       view.layoutSubtreeIfNeeded()
-      return heard.lines.contains(sentence)
+      return heard.lines.contains(sentence) && identifiers(in: view).isSuperset(of: footer)
     }
     XCTAssertEqual(heard.lines.filter { $0 == sentence }.count, 1, "said once")
+
+    fixture.store.wallpaperOptionsSnapshot?.dirty = false
+    try await fixture.panel.waitUntil(timeout: 5) {
+      view.layoutSubtreeIfNeeded()
+      return identifiers(in: view).isDisjoint(with: footer)
+    }
+    XCTAssertEqual(heard.lines.filter { $0 == sentence }.count, 1, "applied or reverted: nothing more is said")
+
+    fixture.store.wallpaperOptionsSnapshot?.dirty = true
+    try await fixture.panel.waitUntil(timeout: 5) {
+      view.layoutSubtreeIfNeeded()
+      return heard.lines.filter { $0 == sentence }.count == 2
+    }
+    XCTAssertTrue(identifiers(in: view).isSuperset(of: footer), "the next edit brings the footer back")
+
+    // Apply changes and Revert go away with the footer once they have done their work, so that is
+    // said too.
+    for (button, said) in [("inspector.applyChanges", "Changes applied."), ("inspector.revert", "Changes reverted.")] {
+      fixture.store.wallpaperOptionsSnapshot?.dirty = true
+      try await fixture.panel.waitUntil(timeout: 5) {
+        view.layoutSubtreeIfNeeded()
+        return identifiers(in: view).isSuperset(of: footer)
+      }
+      let press = try XCTUnwrap(
+        accessibilityObjects(in: view).first { $0.value(forKey: "accessibilityIdentifier") as? String == button })
+      press.perform(NSSelectorFromString("accessibilityPerformPress"))
+      try await fixture.panel.waitUntil(timeout: 5) {
+        view.layoutSubtreeIfNeeded()
+        return heard.lines.contains(said) && identifiers(in: view).isDisjoint(with: footer)
+      }
+    }
+    window.contentView = nil
+    await fixture.shutdown()
+  }
+
+  /// The footer comes in over the bottom of the inspector. A switch flipped, or text typed, at the
+  /// bottom of what is on show is scrolled clear of it, so the footer never lands on the row whose
+  /// edit brought it in.
+  func testTheFooterNeverCoversTheRowWhoseEditBringsItIn() async throws {
+    try await footerStaysClear(of: NSAccessibility.Role.checkBox, "Show the clock") { control, _ in
+      control.perform(NSSelectorFromString("accessibilityPerformPress"))
+    }
+    try await footerStaysClear(of: NSAccessibility.Role.textField, "Caption") { _, root in
+      // The first key typed: text not yet sent brings the footer in.
+      guard let field = views(NSTextField.self, in: root).first(where: { $0.stringValue == "Good evening" })
+      else { return XCTFail("the Caption field") }
+      field.stringValue = "Good evening!"
+      field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+    }
+  }
+
+  /// Puts the control named `label` at the bottom of the inspector, edits it with `edit`, and
+  /// requires that the footer this brings in leaves the control on show above it.
+  private func footerStaysClear(
+    of role: NSAccessibility.Role, _ label: String, edit: (NSObject, NSView) -> Void
+  ) async throws {
+    let fixture = try InspectorRenderFixture()
+    try await prepare(fixture)
+    let (window, view) = fixture.host(size: NSSize(width: 360, height: 3000))
+    try await settle(600)
+    func element(_ match: (NSObject) -> Bool) -> NSObject? {
+      view.layoutSubtreeIfNeeded()
+      return accessibilityObjects(in: view).first(where: match)
+    }
+    func frame(_ object: NSObject?) -> NSRect? {
+      (object?.value(forKey: "accessibilityFrame") as? NSValue)?.rectValue
+    }
+    func isControl(_ object: NSObject) -> Bool {
+      object.value(forKey: "accessibilityRole") as? String == role.rawValue
+        && object.value(forKey: "accessibilityLabel") as? String == label
+    }
+    // The window ends just under the control, as when the person has scrolled it to the bottom.
+    let viewTop = { window.convertToScreen(view.convert(view.bounds, to: nil)).maxY }
+    let height = viewTop() - (try XCTUnwrap(frame(element(isControl)), label)).minY + 12
+    window.setContentSize(NSSize(width: 360, height: height))
+    view.frame = NSRect(origin: .zero, size: NSSize(width: 360, height: height))
+    try await settle(300)
+    let before = try XCTUnwrap(frame(element(isControl)), label)
+    XCTAssertLessThan(before.minY - (viewTop() - height), 40, "precondition: \(label) is at the bottom")
+
+    edit(try XCTUnwrap(element(isControl), label), view)
+    let footer: Set<String> = ["inspector.revert", "inspector.applyChanges"]
+    try await fixture.panel.waitUntil(timeout: 5) {
+      view.layoutSubtreeIfNeeded()
+      return identifiers(in: view).isSuperset(of: footer)
+    }
+    try await settle(500)
+    let after = try XCTUnwrap(frame(element(isControl)), label)
+    let footerTop = try XCTUnwrap(
+      accessibilityObjects(in: view)
+        .filter {
+          footer.contains($0.value(forKey: "accessibilityIdentifier") as? String ?? "")
+            || ($0.value(forKey: "accessibilityLabel") as? String ?? "").contains("You have unapplied changes.")
+            || ($0.value(forKey: "accessibilityValue") as? String ?? "").contains("You have unapplied changes.")
+        }
+        .compactMap { frame($0)?.maxY }
+        .max())
+    XCTAssertGreaterThanOrEqual(after.minY, footerTop, "the footer covers \(label), just edited")
+    XCTAssertLessThanOrEqual(after.maxY, viewTop(), "\(label) is still on show")
+    window.contentView = nil
+    await fixture.shutdown()
+  }
+
+  /// Beside another display each card starts collapsed. A value staged later in one of them, as the
+  /// Black bars card stages a scale factor, opens that card and gives it the Not applied mark; the
+  /// other stays collapsed, and applying leaves the open card open.
+  func testADisplayCardOpensWhenOneOfItsSettingsIsStagedFromElsewhere() async throws {
+    let fixture = try InspectorRenderFixture()
+    try await prepare(fixture)
+    let (window, view) = fixture.host(size: NSSize(width: 360, height: 3000))
+    try await settle(600)
+    /// The card's header button: its words (name, summary, mark) and Expanded or Collapsed.
+    func header(_ title: String) -> (label: String, value: String)? {
+      view.layoutSubtreeIfNeeded()
+      return accessibilityObjects(in: view).lazy
+        .filter { $0.value(forKey: "accessibilityRole") as? String == NSAccessibility.Role.button.rawValue }
+        .compactMap { element -> (String, String)? in
+          guard let label = element.value(forKey: "accessibilityLabel") as? String, label.contains(title)
+          else { return nil }
+          return (label, element.value(forKey: "accessibilityValue") as? String ?? "")
+        }
+        .first
+    }
+    let first = "Studio Display (1 - Primary)"
+    let second = "LG UltraFine (2 - Secondary)"
+    XCTAssertEqual(header(first)?.value, "Collapsed")
+    XCTAssertEqual(header(second)?.value, "Collapsed")
+    XCTAssertEqual(header(second)?.label.contains("Not applied"), false)
+
+    fixture.store.wallpaperOptionsSnapshot?.dirty = true
+    fixture.store.wallpaperOptionsSnapshot?.displayConfigurations[1].staged = true
+    try await fixture.panel.waitUntil(timeout: 5) { header(second)?.value == "Expanded" }
+    XCTAssertEqual(header(second)?.label.contains("Not applied"), true, "the mark says what waits")
+    XCTAssertEqual(header(first)?.value, "Collapsed", "the other card stays as it was")
+
+    fixture.store.wallpaperOptionsSnapshot?.displayConfigurations[1].staged = false
+    fixture.store.wallpaperOptionsSnapshot?.dirty = false
+    try await fixture.panel.waitUntil(timeout: 5) { header(second)?.label.contains("Not applied") == false }
+    XCTAssertEqual(header(second)?.value, "Expanded", "applied: the card the person now sees stays open")
     window.contentView = nil
     await fixture.shutdown()
   }

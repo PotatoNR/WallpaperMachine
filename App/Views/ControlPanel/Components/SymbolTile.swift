@@ -22,7 +22,7 @@ struct SymbolTile: View {
       .overlay {
         Image(systemName: systemImage)
           .symbolVariant(.fill)
-          .font(.system(size: side * 0.54, weight: .medium))
+          .font(.panel(.proportional(to: side, ratio: 0.54, weight: .medium)))
           .foregroundStyle(.white)
       }
       .accessibilityHidden(true)

@@ -6,11 +6,15 @@ final class SurfacePaletteTests: XCTestCase {
   private let tones: [AppThemePreferences.Tone] = [.neutral, .warm, .cool]
   private let appearances: [PanelAppearance] = [.light, .dark]
 
-  func testTextAndSemanticColoursStayReadableInEveryToneAndAppearance() {
-    for tone in tones {
-      for appearance in appearances {
-        let palette = SurfacePalette(tone: tone, appearance: appearance)
-        let context = "\(tone) \(appearance)"
+  /// Every palette the panel can wear in `appearance`: each tone's and the Halloween look's.
+  private func palettes(_ appearance: PanelAppearance) -> [(String, SurfacePalette)] {
+    tones.map { ("\($0) \(appearance)", SurfacePalette(tone: $0, appearance: appearance)) }
+      + [("halloween \(appearance)", SurfacePalette(season: .halloween, appearance: appearance))]
+  }
+
+  func testTextAndSemanticColoursStayReadableInEveryToneSeasonAndAppearance() {
+    for appearance in appearances {
+      for (context, palette) in palettes(appearance) {
         for ground in [
           palette.background, palette.surface, palette.card, palette.raised, palette.well,
           palette.sunken,
@@ -48,10 +52,24 @@ final class SurfacePaletteTests: XCTestCase {
     XCTAssertEqual(SurfacePalette(tone: .cool, appearance: .light).well.hex, "#eef1f6")
   }
 
+  func testTheHalloweenLookHasItsOwnSurfacesInBothAppearances() {
+    for appearance in appearances {
+      let halloween = SurfacePalette(season: .halloween, appearance: appearance)
+      for tone in tones {
+        let everyday = SurfacePalette(tone: tone, appearance: appearance)
+        XCTAssertNotEqual(halloween.background, everyday.background, "\(tone) \(appearance)")
+        XCTAssertNotEqual(halloween.text, everyday.text, "\(tone) \(appearance)")
+      }
+    }
+    // Moonlit ink in the dark: violet, never the neutral grey; parchment in the light: warm.
+    let night = SurfacePalette(season: .halloween, appearance: .dark)
+    XCTAssertGreaterThan(blue(night.surface), red(night.surface))
+    let parchment = SurfacePalette(season: .halloween, appearance: .light)
+    XCTAssertGreaterThan(red(parchment.surface), blue(parchment.surface))
+  }
+
   func testOverlaysAreWhiteOnDarkSurfacesAndBlackOnLightOnes() {
-    for tone in tones {
-      let dark = SurfacePalette(tone: tone, appearance: .dark)
-      let light = SurfacePalette(tone: tone, appearance: .light)
+    for (dark, light) in zip(palettes(.dark).map(\.1), palettes(.light).map(\.1)) {
       for overlay in [dark.line, dark.divider, dark.hover, dark.pressed, dark.selected] {
         XCTAssertEqual(overlay.rgb, 0xffffff)
         XCTAssertLessThan(overlay.alpha, 0.2)
@@ -83,6 +101,63 @@ final class SurfacePaletteTests: XCTestCase {
     // 55% neutral and 45% amber, channel by channel, as the web panel mixed it.
     XCTAssertEqual(
       SurfacePalette.miniature(tone: .warm, appearance: .light).background.hex, "#f5efe7")
+  }
+
+  /// What lies over a picture is drawn on any picture in any look, so it never follows the tone,
+  /// the season or the appearance.
+  func testWhatLiesOverAPictureIsTheSameInEveryToneSeasonAndAppearance() {
+    func overlays(_ palette: SurfacePalette) -> [PanelColor] {
+      [
+        palette.scrim, palette.scrimStrong, palette.scrimSubtle, palette.markFill,
+        palette.markFillHover, palette.markGlyph, palette.markApproved, palette.markHeart,
+        palette.controlFill, palette.controlRim,
+      ]
+    }
+    let reference = overlays(SurfacePalette(tone: .neutral, appearance: .light))
+    for appearance in appearances {
+      for (context, palette) in palettes(appearance) {
+        XCTAssertEqual(overlays(palette), reference, context)
+      }
+    }
+  }
+
+  /// The brightest picture is white: a status's words and glyphs must read on it through the scrim
+  /// and the disc they are drawn on, and the disc under the pointer and the scrims must step from
+  /// lighter to darker.
+  func testWordsAndGlyphsOverAPictureStayReadableOverTheBrightestPicture() {
+    let palette = SurfacePalette(tone: .neutral, appearance: .light)
+    let white = PanelColor(rgb: 0xffffff)
+    /// `layers` of black or white laid over a white picture, in order.
+    func over(_ layers: PanelColor...) -> PanelColor {
+      var channel = 1.0
+      for layer in layers {
+        let ink = layer.rgb == 0 ? 0.0 : 1.0
+        channel = channel * (1 - layer.alpha) + ink * layer.alpha
+      }
+      let value = UInt32((channel * 255).rounded())
+      return PanelColor(rgb: value << 16 | value << 8 | value)
+    }
+    let glyph = palette.markGlyph
+    XCTAssertGreaterThanOrEqual(glyph.contrast(with: over(palette.markFill)), 4.5, "a mark's disc")
+    XCTAssertGreaterThanOrEqual(
+      glyph.contrast(with: over(palette.scrim, palette.markFill)), 4.5, "a ring's disc on a scrim")
+    XCTAssertGreaterThanOrEqual(
+      glyph.contrast(with: over(palette.scrimStrong)), 4.5, "Applying, straight on the scrim")
+    XCTAssertGreaterThanOrEqual(glyph.contrast(with: over(palette.controlFill)), 3, "a tile's check")
+    // A mark's trophy and heart are graphics, not words: 3:1 against the disc they sit on.
+    XCTAssertGreaterThanOrEqual(
+      palette.markApproved.contrast(with: over(palette.markFill)), 3, "the trophy on a mark's disc")
+    XCTAssertGreaterThanOrEqual(
+      palette.markHeart.contrast(with: over(palette.markFill)), 3, "the heart on a mark's disc")
+    XCTAssertEqual(glyph, white)
+
+    let darkness = [
+      palette.scrimSubtle, palette.scrim, palette.scrimStrong, palette.markFill,
+      palette.markFillHover,
+    ].map(\.alpha)
+    XCTAssertEqual(darkness, darkness.sorted(), "subtle, scrim, strong, the disc, the disc hovered")
+    XCTAssertLessThan(palette.scrim.alpha, palette.scrimStrong.alpha)
+    XCTAssertLessThan(palette.markFill.alpha, palette.markFillHover.alpha)
   }
 
   private func red(_ color: PanelColor) -> Int { Int((color.rgb >> 16) & 255) }

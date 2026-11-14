@@ -163,7 +163,7 @@ private struct DisplaysIconButtonBody: View {
   var body: some View {
     configuration.label
       .foregroundStyle(configuration.isPressed ? theme.surface.text.color : theme.surface.muted.color)
-      .opacity(isEnabled ? 1 : 0.3)
+      .panelDisabledOpacity(isEnabled)
   }
 }
 

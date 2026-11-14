@@ -23,7 +23,8 @@ class InspectorTestCase: PanelTestCase {
   ) -> LibraryRow {
     LibraryRow(
       id: id, title: title, kind: kind, previewFile: nil, cover: .none, canAnimate: false,
-      isActive: false, isSupported: supported, tags: [], isApproved: false, size: size,
+      isActive: false, isSupported: supported, tags: [],
+      searchText: LibraryRow.searchText(title: title, words: ""), isApproved: false, size: size,
       addedAt: nil, energy: energy, isUpdateAvailable: false, updatedAt: nil)
   }
 
@@ -53,10 +54,47 @@ final class InspectorPolicyTests: InspectorTestCase {
   }
 
   func testTheButtonRestartsWhatTheTargetShowsAndOtherwiseApplies() {
-    XCTAssertTrue(InspectorPolicy.reapplies("a", target: target(showing: "a")))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: target(showing: "b")))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: target()))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: nil))
+    func reapplies(_ target: TargetDisplayOption?) -> Bool {
+      ApplyOffer(
+        wallpaperID: "a", shownID: target?.wallpaperID, canApply: true, isBusy: { _ in false }
+      ).reapplies
+    }
+    XCTAssertTrue(reapplies(target(showing: "a")))
+    XCTAssertFalse(reapplies(target(showing: "b")))
+    XCTAssertFalse(reapplies(target()))
+    XCTAssertFalse(reapplies(nil))
+  }
+
+  /// The offer carries the button's words and symbol, so every inspector draws Apply and Reapply
+  /// alike: each its own label and symbol, and Apply never the Play symbol a rotation starts with.
+  func testApplyAndReapplyCarryTheirOwnLabelAndSymbolAndApplyIsNotPlay() {
+    let apply = ApplyOffer(wallpaperID: "a", shownID: "b", canApply: true, isBusy: { _ in false })
+    let reapply = ApplyOffer(wallpaperID: "a", shownID: "a", canApply: true, isBusy: { _ in false })
+    XCTAssertEqual(apply.systemImage, ApplyOffer.symbol)
+    XCTAssertEqual(reapply.systemImage, ApplyOffer.reapplySymbol)
+    XCTAssertNotEqual(apply.title, reapply.title)
+    XCTAssertFalse(apply.title.isEmpty || reapply.title.isEmpty)
+    XCTAssertNotEqual(apply.systemImage, "play.fill", "Play starts a rotation; applying is not playing")
+    XCTAssertEqual(apply.help, apply.title, "with no display to name, the help is the label")
+  }
+
+  /// With a display to name, the help says where the wallpaper goes; the label, which VoiceOver's
+  /// action and the UI tests read, stays the bare verb.
+  func testTheHelpNamesTheTargetDisplayOnlyWhenTheOfferHasOne() {
+    func offer(shown: String?, target: String?) -> ApplyOffer {
+      ApplyOffer(wallpaperID: "a", shownID: shown, canApply: true, targetName: target, isBusy: { _ in false })
+    }
+    let unnamed = offer(shown: nil, target: nil)
+    let named = offer(shown: nil, target: "Studio")
+    XCTAssertEqual(unnamed.help, unnamed.title)
+    XCTAssertTrue(named.help.contains("Studio"))
+    XCTAssertEqual(named.title, unnamed.title, "the label does not grow with the name")
+    XCTAssertEqual(named.systemImage, unnamed.systemImage)
+
+    let reapply = offer(shown: "a", target: "Studio")
+    XCTAssertTrue(reapply.help.contains("Studio"))
+    XCTAssertNotEqual(reapply.help, named.help, "reapplying and applying say so in the help too")
+    XCTAssertEqual(reapply.title, offer(shown: "a", target: nil).title)
   }
 
   /// Port of `ControlPanelDisplayLayoutTests.testInspectorAppliesToEveryDisplay...` (offered with two
@@ -155,14 +193,31 @@ final class InspectorPolicyTests: InspectorTestCase {
   /// failure takes the plain link's place with a report of its own.
   func testOnlyAWallpaperThatCanRunGetsThePlainReportAndAFailureCarriesItsOwn() {
     for kind in [LibraryRow.Kind.scene, .video, .web] {
-      XCTAssertEqual(InspectorPolicy.issueReport(for: row(kind: kind), failure: nil), .plain, "\(kind)")
+      XCTAssertEqual(
+        InspectorPolicy.issueReport(for: row(kind: kind), failure: nil, sceneResourcesMissing: false),
+        .plain, "\(kind)")
     }
     XCTAssertEqual(
-      InspectorPolicy.issueReport(for: row(kind: .unknown, supported: false), failure: nil), .none,
-      "an Application wallpaper cannot run, so there is nothing to report but its type")
+      InspectorPolicy.issueReport(
+        for: row(kind: .unknown, supported: false), failure: nil, sceneResourcesMissing: false),
+      .none, "an Application wallpaper cannot run, so there is nothing to report but its type")
     XCTAssertEqual(
-      InspectorPolicy.issueReport(for: row(kind: .scene), failure: "The scene file is damaged."),
+      InspectorPolicy.issueReport(
+        for: row(kind: .scene), failure: "The scene file is damaged.", sceneResourcesMissing: false),
       .failure("The scene file is damaged."))
+  }
+
+  /// A scene waiting for the shared resources is setup to finish, not a problem to
+  /// report, so no report sits beside the notice that offers them, failure or not.
+  func testASceneWaitingForTheSharedResourcesOffersNoReport() {
+    for failure in [nil, "Shared resources are not installed."] {
+      XCTAssertEqual(
+        InspectorPolicy.issueReport(for: row(kind: .scene), failure: failure, sceneResourcesMissing: true),
+        .none)
+    }
+    XCTAssertEqual(
+      InspectorPolicy.issueReport(for: row(kind: .video), failure: nil, sceneResourcesMissing: true),
+      .plain, "other types do not need them")
   }
 
   func testTheMenusReportCarriesTheFailureAndNoneIsOfferedForAWallpaperThatCannotRun() async throws {
@@ -176,24 +231,32 @@ final class InspectorPolicyTests: InspectorTestCase {
           id: "tool", title: "Tool", kind: .unknown, supported: false, active: false,
           selected: false, previewPath: nil),
       ]
-      func body(_ url: URL?) throws -> String {
+      func details(_ url: URL?) throws -> String {
         let components = try XCTUnwrap(
           URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false))
-        return try XCTUnwrap(components.queryItems?.first { $0.name == "body" }?.value)
+        return try XCTUnwrap(components.queryItems?.first { $0.name == "app-details" }?.value)
       }
+      panel.sceneAssets.available = true
+      panel.workshop.refreshSceneAssetsReadiness()
       let ghost = try XCTUnwrap(controller.libraryRow(id: "ghost"))
       let tool = try XCTUnwrap(controller.libraryRow(id: "tool"))
 
       XCTAssertNil(controller.inspectorIssueReportURL(for: tool))
-      XCTAssertFalse(try body(controller.inspectorIssueReportURL(for: ghost)).contains("**Error:**"))
+      XCTAssertFalse(try details(controller.inspectorIssueReportURL(for: ghost)).contains("**Error:**"))
 
       controller.activationFailures["ghost"] = "The scene file is damaged."
       XCTAssertTrue(
-        try body(controller.inspectorIssueReportURL(for: ghost))
+        try details(controller.inspectorIssueReportURL(for: ghost))
           .contains("**Error:** The scene file is damaged."), "the menu's report carries the failure")
       XCTAssertEqual(
-        InspectorPolicy.issueReport(for: ghost, failure: controller.activationFailures["ghost"]),
+        controller.inspectorIssueReport(for: ghost),
         .failure("The scene file is damaged."), "so the plain link under the type sentence steps aside")
+
+      panel.sceneAssets.available = false
+      panel.workshop.refreshSceneAssetsReadiness()
+      XCTAssertNil(
+        controller.inspectorIssueReportURL(for: ghost),
+        "a scene waiting for the shared resources gets their notice instead")
     }
   }
 
@@ -227,9 +290,45 @@ final class InspectorPolicyTests: InspectorTestCase {
     }
   }
 
-  // MARK: Position
+  // MARK: Apply changes
 
-  func testOnlyTheDisplayTheNativePlayerDrawsOnSaysSoAndOffersPerformance() {
+  /// Revert and Apply changes are drawn only while something waits to be applied, and Apply
+  /// changes then takes the accent from Apply wallpaper: one accent button at a time.
+  func testTheFooterAndItsAccentApplyAppearOnlyWhileSomethingWaitsToBeApplied() {
+    func make(dirty: Bool = false, inputs: InspectorOptions.Inputs = .init()) -> InspectorOptions {
+      InspectorOptions.make(
+        BridgeSnapshotFixtures.options(
+          wallpaperId: "w", dirty: dirty,
+          properties: [property("caption", .textInput, label: "Caption", value: .string(value: "Hi"))]),
+        inputs: inputs)
+    }
+    let clean = make()
+    XCTAssertFalse(InspectorPolicy.showsFooter(clean), "nothing to apply or revert")
+    XCTAssertEqual(InspectorPolicy.primaryAction(clean), .applyWallpaper)
+    XCTAssertFalse(InspectorPolicy.showsFooter(nil), "the options are still loading")
+    XCTAssertEqual(InspectorPolicy.primaryAction(nil), .applyWallpaper)
+
+    var typed = InspectorOptions.Inputs()
+    typed.textDrafts = ["caption": "Hello"]
+    var chosen = InspectorOptions.Inputs()
+    chosen.pendingValues = ["caption": .string(value: "Hey")]
+    var engine = InspectorOptions.Inputs()
+    engine.pendingEngineValues = [.brightness: .number(value: 60)]
+    let waiting: [(String, InspectorOptions)] = [
+      ("an edit the bridge holds", make(dirty: true)), ("text typed", make(inputs: typed)),
+      ("a value on its way", make(inputs: chosen)),
+      ("an engine option on its way", make(inputs: engine)),
+    ]
+    for (what, options) in waiting {
+      XCTAssertTrue(InspectorPolicy.showsFooter(options), what)
+      XCTAssertEqual(InspectorPolicy.primaryAction(options), .applyChanges, what)
+      XCTAssertTrue(options.canRevert, "\(what): the footer's buttons have something to act on")
+    }
+  }
+
+  // MARK: Frame rate
+
+  func testADisplayTheNativePlayerDrawsOnHasNoFrameRateToSet() {
     let snapshot = BridgeSnapshotFixtures.options(
       wallpaperId: "clip", kind: .video,
       displayConfigurations: [
@@ -239,7 +338,40 @@ final class InspectorPolicyTests: InspectorTestCase {
     var inputs = InspectorOptions.Inputs()
     inputs.nativePlayerDisplays = [1]
     let displays = InspectorOptions.make(snapshot, inputs: inputs).displays
-    XCTAssertEqual(displays.map(InspectorPolicy.positionNote(for:)), [.nativePlayer, .explains])
+    XCTAssertEqual(
+      displays.map(InspectorPolicy.offersFrameRate(for:)), [false, true],
+      "a clip plays at its own rate on the native player; another display of it keeps the row")
+  }
+
+  func testFitWithBlurredBackdropIsOfferedWhereAScalingModeMovesThePicture() {
+    let configurations = [
+      InspectorRenderFixture.config("primary", "Studio Display (1 - Primary)", mode: .fill, factor: 1, pan: (0.5, 0.5)),
+      InspectorRenderFixture.config("second", "LG UltraFine (2 - Secondary)", mode: .matchBlurred, factor: 1, pan: (0.5, 0.5)),
+    ]
+    for kind in [BridgeWallpaperKind.projectScene, .video] {
+      let options = InspectorOptions.make(
+        BridgeSnapshotFixtures.options(wallpaperId: "w", kind: kind, displayConfigurations: configurations))
+      XCTAssertEqual(
+        options.displays.map { InspectorPolicy.offersBlurredFit(options, display: $0) }, [true, true], "\(kind)")
+    }
+    // A web page fills its window whatever the mode; a display already set to it keeps it shown.
+    let web = InspectorOptions.make(
+      BridgeSnapshotFixtures.options(wallpaperId: "w", kind: .webpage, displayConfigurations: configurations))
+    XCTAssertEqual(web.displays.map { InspectorPolicy.offersBlurredFit(web, display: $0) }, [false, true])
+  }
+
+  func testOnlyANativelyPlayedVideoWithABlurredBackdropIsToldItsBarsStayBlack() {
+    let snapshot = BridgeSnapshotFixtures.options(
+      wallpaperId: "clip", kind: .video,
+      displayConfigurations: [
+        InspectorRenderFixture.config("primary", "Studio Display (1 - Primary)", mode: .matchBlurred, factor: 1, pan: (0.5, 0.5)),
+        InspectorRenderFixture.config("second", "LG UltraFine (2 - Secondary)", mode: .matchBlurred, factor: 1, pan: (0.5, 0.5)),
+        InspectorRenderFixture.config("third", "Built-in (3 - Secondary)", mode: .match, factor: 1, pan: (0.5, 0.5)),
+      ])
+    var inputs = InspectorOptions.Inputs()
+    inputs.nativePlayerDisplays = [1, 3]
+    let displays = InspectorOptions.make(snapshot, inputs: inputs).displays
+    XCTAssertEqual(displays.map(InspectorPolicy.blurredFitNote(for:)), [.nativePlayer, .none, .none])
   }
 
   func testAStillTheAppPackagedIsToldByItsIdAndTheArtworkIdIsRead() {

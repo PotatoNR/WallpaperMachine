@@ -32,8 +32,8 @@ final class PanelLibraryStateTests: PanelTestCase {
 
   func testTheCardNamesTheTargetsWallpaperAndTheStatusFollowsEveryDisplayAndTheGlobalPause() {
     let playing = NowPlayingState.make(
-      target: target(), item: row("a"), hasWallpaper: true, hasOtherWallpaper: true, previousID: "b",
-      isPaused: false, isBusy: false)
+      target: target(), item: row("a"), hasWallpaper: true, hasOtherWallpaper: true,
+      hasRandomCandidate: true, previousID: "b", isPaused: false, isBusy: false)
     XCTAssertEqual(playing.title, "Title a")
     XCTAssertEqual(playing.status, L("Playback running"))
     XCTAssertEqual(playing.detail, L("Playback running"))
@@ -46,8 +46,8 @@ final class PanelLibraryStateTests: PanelTestCase {
     XCTAssertTrue(playing.canTogglePlayback && playing.canGoPrevious && playing.canGoNext)
 
     let paused = NowPlayingState.make(
-      target: target(), item: row("a"), hasWallpaper: true, hasOtherWallpaper: true, previousID: "b",
-      isPaused: true, isBusy: false)
+      target: target(), item: row("a"), hasWallpaper: true, hasOtherWallpaper: true,
+      hasRandomCandidate: true, previousID: "b", isPaused: true, isBusy: false)
     XCTAssertEqual(paused.status, L("Playback paused"))
     XCTAssertEqual(paused.playbackLabel, L("Resume wallpaper playback"))
     XCTAssertTrue(paused.showsPlay)
@@ -59,9 +59,10 @@ final class PanelLibraryStateTests: PanelTestCase {
     for paused in [false, true] {
       let idle = NowPlayingState.make(
         target: target(wallpaper: nil), item: nil, hasWallpaper: false, hasOtherWallpaper: true,
-        previousID: nil, isPaused: paused, isBusy: false)
+        hasRandomCandidate: true, previousID: nil, isPaused: paused, isBusy: false)
       XCTAssertEqual(idle.status, L("No wallpaper playing"), "no assignments must not read as running or paused")
-      XCTAssertEqual(idle.detail, L("Pick a wallpaper and press Play to show it here."))
+      XCTAssertFalse(idle.detail.isEmpty)
+      XCTAssertNotEqual(idle.detail, idle.status, "the line says how to apply one, not the status again")
       XCTAssertEqual(idle.title, L("Nothing on this display"))
       XCTAssertEqual(idle.help, idle.status)
       XCTAssertNil(idle.showInLibraryLabel)
@@ -75,26 +76,28 @@ final class PanelLibraryStateTests: PanelTestCase {
   func testAnotherDisplaysWallpaperKeepsTheTogglePlayableWhileTheTargetShowsNothing() {
     let card = NowPlayingState.make(
       target: target(wallpaper: nil), item: nil, hasWallpaper: true, hasOtherWallpaper: true,
-      previousID: nil, isPaused: false, isBusy: false)
+      hasRandomCandidate: true, previousID: nil, isPaused: false, isBusy: false)
     XCTAssertTrue(card.canTogglePlayback, "play and pause act on every display")
     XCTAssertEqual(card.status, L("Playback running"))
     XCTAssertEqual(card.detail, L("Playback running"), "the line reports it even when this display is empty")
     XCTAssertEqual(card.title, L("Nothing on this display"))
     let paused = NowPlayingState.make(
       target: target(wallpaper: nil), item: nil, hasWallpaper: true, hasOtherWallpaper: true,
-      previousID: nil, isPaused: true, isBusy: false)
+      hasRandomCandidate: true, previousID: nil, isPaused: true, isBusy: false)
     XCTAssertTrue(paused.canTogglePlayback, "paused playback stays resumable")
     XCTAssertNotEqual(paused.status, card.status)
   }
 
+  private func card(
+    _ target: TargetDisplayOption?, previous: String? = "b", other: Bool = true, random: Bool = true,
+    busy: Bool = false
+  ) -> NowPlayingState {
+    NowPlayingState.make(
+      target: target, item: nil, hasWallpaper: true, hasOtherWallpaper: other, hasRandomCandidate: random,
+      previousID: previous, isPaused: false, isBusy: busy)
+  }
+
   func testPreviousAndNextNeedADisplayThatCanShowItsOwnWallpaperAndSomethingToSwitchTo() {
-    func card(_ target: TargetDisplayOption?, previous: String? = "b", other: Bool = true, busy: Bool = false)
-      -> NowPlayingState
-    {
-      NowPlayingState.make(
-        target: target, item: nil, hasWallpaper: true, hasOtherWallpaper: other, previousID: previous,
-        isPaused: false, isBusy: busy)
-    }
     XCTAssertTrue(card(target()).canGoPrevious && card(target()).canGoNext)
     XCTAssertFalse(card(target(), previous: nil).canGoPrevious, "no previous wallpaper still in the library")
     XCTAssertFalse(card(target(), other: false).canGoNext, "nothing else supported to switch to")
@@ -105,6 +108,16 @@ final class PanelLibraryStateTests: PanelTestCase {
     }
     XCTAssertFalse(card(target(), busy: true).canTogglePlayback, "locked while a command runs")
     XCTAssertTrue(card(target(), busy: true).canGoNext, "only the toggle waits for the queue")
+  }
+
+  func testRandomNeedsADisplayThatCanShowItsOwnWallpaperAndAnotherThatIsNotHeldBack() {
+    XCTAssertTrue(card(target()).canPickRandom)
+    XCTAssertFalse(card(target(), random: false).canPickRandom, "nothing else the pick may be")
+    XCTAssertTrue(card(target(), random: false).canGoNext, "Next does not skip a held wallpaper")
+    for unusable in [target(enabled: false), target(mirror: true), nil] {
+      XCTAssertFalse(card(unusable).canPickRandom)
+    }
+    XCTAssertTrue(card(target(), busy: true).canPickRandom, "only the toggle waits for the queue")
   }
 
   func testTheControllersCardUsesEveryDisplaysAssignmentAndTheGlobalPause() async throws {
@@ -127,6 +140,11 @@ final class PanelLibraryStateTests: PanelTestCase {
       let running = card.status
 
       let runningLabel = card.playbackLabel
+      XCTAssertTrue(card.canGoNext && card.canPickRandom, "another display's wallpaper can be picked")
+      panel.store.appSnapshot.heldWallpaperIds = ["second"]
+      XCTAssertFalse(controller.nowPlaying.canPickRandom, "a pick never reopens a held wallpaper")
+      XCTAssertTrue(controller.nowPlaying.canGoNext)
+      panel.store.appSnapshot.heldWallpaperIds = []
 
       panel.store.appSnapshot.playbackState = .paused
       card = controller.nowPlaying
@@ -196,6 +214,36 @@ final class PanelLibraryStateTests: PanelTestCase {
       XCTAssertEqual(panel.controller.targetDisplay?.id, "primary")
       panel.navigation.targetDisplayID = "gone"
       XCTAssertNil(panel.controller.targetDisplay)
+    }
+  }
+
+  /// The Apply buttons' help names the target only while another display could take the wallpaper
+  /// instead, by the name the toolbar shows; with one such display there is nothing to tell apart.
+  func testApplyNamesTheTargetOnlyWhileAnotherDisplayCouldTakeTheWallpaper() async throws {
+    let names = DisplayTitleResolver(names: { ["primary": "Built-in Retina Display"] })
+    try await withPanel(displayTitles: names) { panel in
+      panel.configureDisplays()
+      panel.store.settingsSnapshot.displays[0].title = "Vendor 1552 - Model 41055 (primary - Primary)"
+      XCTAssertEqual(
+        panel.controller.applyTargetName, "Built-in Retina Display", "the renderer's suffix is left off")
+
+      panel.store.settingsSnapshot.displays[1].mode = .mirror
+      XCTAssertNil(panel.controller.applyTargetName, "the other display mirrors: no choice to name")
+      panel.store.settingsSnapshot.displays[1].mode = .standalone
+      panel.store.settingsSnapshot.displays[1].enabled = false
+      XCTAssertNil(panel.controller.applyTargetName, "the other display is disabled")
+      panel.store.settingsSnapshot.displays[1].enabled = true
+      XCTAssertNotNil(panel.controller.applyTargetName)
+
+      panel.store.settingsSnapshot.displays.append(
+        BridgeDisplaySettingsRow(
+          displayId: "third", title: "third", enabled: true, mode: .standalone, mirrorTargets: [],
+          selectedMirrorTarget: nil, scalingMode: .fill, scalingFactor: 1, targetFps: 30, maxFps: 60,
+          muted: false, volume: 1))
+      panel.store.settingsSnapshot.displays[0].mode = .mirror
+      XCTAssertNil(panel.controller.applyTargetName, "a mirror target takes no wallpaper of its own")
+      panel.navigation.targetDisplayID = "gone"
+      XCTAssertNil(panel.controller.applyTargetName, "a target that left the list is not named")
     }
   }
 
@@ -306,34 +354,142 @@ final class PanelLibraryStateTests: PanelTestCase {
       panel.store.settingsSnapshot.sceneRenderers = [
         BridgeSceneBackendReport(
           displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
-          backend: "legacy_vulkan", fallbackReason: "lit particles", videoPath: "none",
-          optimizationApplied: nil),
+          backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
+          optimizationApplied: nil, qualityInForce: nil),
         BridgeSceneBackendReport(
           displayId: 2, displayName: "Side", wallpaperId: "ghost", wallpaperTitle: "Ghost",
-          backend: "legacy_vulkan", fallbackReason: "lit particles", videoPath: "none",
-          optimizationApplied: nil),
+          backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
+          optimizationApplied: nil, qualityInForce: nil),
       ]
-      func body(_ url: URL?) throws -> String {
+      func fields(_ url: URL?) throws -> [String: String] {
         let components = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false))
         XCTAssertTrue(components.path.hasSuffix("/issues/new"))
-        return try XCTUnwrap(components.queryItems?.first { $0.name == "body" }?.value)
+        return Dictionary(
+          uniqueKeysWithValues: try XCTUnwrap(components.queryItems).map { ($0.name, $0.value ?? "") })
+      }
+      func details(_ url: URL?) throws -> [String] {
+        try XCTUnwrap(fields(url)["app-details"]).components(separatedBy: "\n")
       }
       let version = try XCTUnwrap(
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
 
-      let plain = try body(panel.controller.issueReportURL(for: "ghost"))
-      XCTAssertTrue(plain.contains("**App version:** \(version)"), plain)
-      XCTAssertTrue(plain.contains("**Renderer:** legacy_vulkan (fallback: lit particles)\n"), "each backend once: \(plain)")
+      let plainFields = try fields(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertEqual(plainFields["version"], version)
+      XCTAssertEqual(plainFields["wallpaper"], "ghost")
+      let plain = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(plain.contains("**Renderer:** native_metal"), "each backend once: \(plain)")
       XCTAssertTrue(plain.contains("**Type:** Scene"))
-      XCTAssertFalse(plain.contains("**Error:**"), plain)
+      XCTAssertFalse(plain.contains { $0.hasPrefix("**Error:**") }, "\(plain)")
 
-      let failed = try body(panel.controller.issueReportURL(for: "ghost", failure: "The scene file is damaged."))
-      XCTAssertTrue(failed.contains("**Error:** The scene file is damaged."), failed)
+      let failed = try details(panel.controller.issueReportURL(for: "ghost", failure: "The scene file is damaged."))
+      XCTAssertTrue(failed.contains("**Error:** The scene file is damaged."), "\(failed)")
 
-      let workshop = try body(panel.controller.issueReportURL(for: "123456"))
-      XCTAssertTrue(workshop.contains("**Workshop item:** https://steamcommunity.com/sharedfiles/filedetails/?id=123456"), workshop)
-      XCTAssertFalse(workshop.contains("**Renderer:**"), "nothing reported for it, nothing claimed")
+      let workshop = try fields(panel.controller.issueReportURL(for: "123456"))
+      XCTAssertEqual(workshop["wallpaper"], "https://steamcommunity.com/sharedfiles/filedetails/?id=123456")
+      XCTAssertFalse(
+        workshop["app-details"]?.contains("**Renderer:**") ?? true, "nothing reported for it, nothing claimed")
       XCTAssertNil(panel.controller.issueReportURL(for: "not-installed"))
+
+      // A scene held because Native Metal cannot draw it has no backend to name: the report says it was not drawn.
+      panel.store.settingsSnapshot.sceneRenderers = [
+        BridgeSceneBackendReport(
+          displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
+          backend: "unknown", failureStage: "unsupported",
+          failureReason: "the scene uses a puppet", videoPath: "none", optimizationApplied: nil, qualityInForce: nil)
+      ]
+      let held = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(
+        held.contains("**Renderer:** not drawn (unsupported: the scene uses a puppet)"), "\(held)")
+      XCTAssertFalse(held.contains { $0.contains("unknown") }, "a backend nobody named is not a renderer: \(held)")
     }
+  }
+
+  func testTheReportListsThePropertiesChangedFromTheirDefaultsWithoutTypedTextOrPaths() async throws {
+    try await withPanel { panel in
+      panel.store.librarySnapshot.wallpapers = [
+        BridgeWallpaperEntry(
+          id: "ghost", title: "Ghost", kind: .projectScene, supported: true, active: false,
+          selected: false, previewPath: nil),
+        BridgeWallpaperEntry(
+          id: "other", title: "Other", kind: .projectScene, supported: true, active: false,
+          selected: false, previewPath: nil),
+      ]
+      typealias Context = PanelPropertyContext
+      panel.store.wallpaperOptionsSnapshot = BridgeSnapshotFixtures.options(
+        wallpaperId: "ghost",
+        properties: [
+          Context.property("speed", .slider, .number(value: 0.25), defaultValue: .number(value: 1)),
+          Context.property("fine", .slider, .number(value: 0.123456789), defaultValue: .number(value: 0)),
+          Context.property("rain", .bool, .bool(value: true), dirty: true, defaultValue: .bool(value: false)),
+          Context.property(
+            "tint", .color, .colorRgb(red: 1, green: 0.5, blue: 0),
+            defaultValue: .colorRgb(red: 1, green: 1, blue: 1)),
+          Context.property("unchanged", .slider, .number(value: 3)),
+          Context.property(
+            "name", .textInput, .string(value: "my secret note"), defaultValue: .string(value: "")),
+          Context.property(
+            "photo", .file, .string(value: "/Users/someone/Pictures/me.jpg"), defaultValue: .string(value: "")),
+        ])
+      func details(_ url: URL?) throws -> String {
+        let items = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false)?.queryItems)
+        return try XCTUnwrap(items.first { $0.name == "app-details" }?.value)
+      }
+
+      let report = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(report.contains("`speed`: 0.25 (default: 1)"), report)
+      XCTAssertTrue(report.contains("`fine`: 0.123456789 (default: 0)"), "every digit, to reproduce it: \(report)")
+      XCTAssertTrue(report.contains("`rain`: true (default: false)"), report)
+      XCTAssertFalse(
+        report.contains("(not applied)"), "a changed value that is applied is what the wallpaper uses: \(report)")
+      XCTAssertTrue(report.contains("`tint`: 1 0.5 0 (default: 1 1 1)"), report)
+      XCTAssertFalse(report.contains("`unchanged`"), "a property at its default is not listed: \(report)")
+      XCTAssertTrue(report.contains("`name`"), report)
+      XCTAssertFalse(report.contains("my secret note"), "typed text stays out: \(report)")
+      XCTAssertTrue(report.contains("`photo`"), report)
+      XCTAssertFalse(report.contains("/Users/"), "file paths stay out: \(report)")
+
+      let other = try details(panel.controller.issueReportURL(for: "other"))
+      XCTAssertFalse(other.contains("`speed`"), "another wallpaper's options are not this one's")
+    }
+  }
+
+  func testTheReportQuotesTheFilesTheLastCheckFoundMissing() throws {
+    let url = LibraryIssueReport.url(
+      for: row("rain"), missingFiles: [
+        MissingSceneFile(layer: "Drops", path: "materials/drops.json"),
+        MissingSceneFile(layer: "", path: "effects/glow/effect.json"),
+      ], version: "1.0")
+    let items = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false)?.queryItems)
+    let details = try XCTUnwrap(items.first { $0.name == "app-details" }?.value)
+    XCTAssertTrue(details.contains("`materials/drops.json`"), details)
+    XCTAssertTrue(details.contains("Drops"), "the layer that asked for it: \(details)")
+    XCTAssertTrue(details.contains("`effects/glow/effect.json`"), details)
+  }
+
+  /// A property changed from its default and applied is what the wallpaper on screen uses; only a
+  /// value that still waits for Apply changes is called not applied, however far from its default.
+  func testOnlyAValueWaitingForApplyIsCalledNotAppliedInTheReport() {
+    typealias Context = PanelPropertyContext
+    let lines = LibraryIssueReport.changedProperties([
+      Context.property("applied", .bool, .bool(value: true), dirty: true, defaultValue: .bool(value: false)),
+      Context.property(
+        "waiting", .slider, .number(value: 2), dirty: true, defaultValue: .number(value: 1), staged: true),
+      Context.property(
+        "restored", .slider, .number(value: 1), dirty: false, defaultValue: .number(value: 1), staged: true),
+    ])
+    XCTAssertEqual(lines.count, 2, "a value back at its default is not a change to report: \(lines)")
+    XCTAssertTrue(lines[0].hasPrefix("- `applied`"), lines[0])
+    XCTAssertFalse(lines[0].hasSuffix("(not applied)"), lines[0])
+    XCTAssertTrue(lines[1].hasPrefix("- `waiting`"), lines[1])
+    XCTAssertTrue(lines[1].hasSuffix("(not applied)"), lines[1])
+  }
+
+  func testTheChangedPropertyListIsCappedAndCountsTheRest() {
+    let changed = (0..<25).map {
+      PanelPropertyContext.property("p\($0)", .slider, .number(value: 1), defaultValue: .number(value: 0))
+    }
+    let lines = LibraryIssueReport.changedProperties(changed)
+    XCTAssertEqual(lines.count, LibraryIssueReport.changedPropertyLimit + 1)
+    XCTAssertEqual(lines.last, "- and 5 more")
   }
 }

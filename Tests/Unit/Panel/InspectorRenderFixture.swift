@@ -89,13 +89,15 @@ final class InspectorRenderFixture {
       muted: false, volume: 1)
   }
 
+  /// One display's row; `staged` says its Enabled switch or scale factor waits for Apply changes.
   static func config(
-    _ id: String, _ title: String, mode: BridgeScalingMode, factor: Double, pan: (Double, Double)
+    _ id: String, _ title: String, mode: BridgeScalingMode, factor: Double, pan: (Double, Double),
+    enabled: Bool = true, staged: Bool = false
   ) -> BridgeDisplayConfigRow {
     BridgeDisplayConfigRow(
-      displayId: id, title: title, enabled: true, scalingMode: mode, scalingFactor: factor,
+      displayId: id, title: title, enabled: enabled, scalingMode: mode, scalingFactor: factor,
       framing: BridgeFraming(panX: pan.0, panY: pan.1), targetFps: 30, maxFps: 60, muted: false,
-      volume: 1, dirty: false, canRestoreDefaults: false)
+      volume: 1, dirty: false, canRestoreDefaults: false, staged: staged)
   }
 
   /// Every kind of authored row: a group with a rich label, a switch, two sliders, a choice, a

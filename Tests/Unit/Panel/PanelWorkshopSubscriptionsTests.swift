@@ -11,7 +11,10 @@ final class PanelWorkshopSubscriptionsTests: MediaPanelTestCase {
     subscribed: [String: String], supportPrompt: SupportPromptStore? = nil
   ) throws -> BrowsingPanel {
     SubscriptionsProtocol.subscribed = subscribed
-    addTeardownBlock { SubscriptionsProtocol.subscribed = [:] }
+    addTeardownBlock {
+      SubscriptionsProtocol.subscribed = [:]
+      SubscriptionsProtocol.unreachable = false
+    }
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SubscriptionsProtocol.self]
     let panel = try makeBrowsingPanel(
@@ -33,6 +36,48 @@ final class PanelWorkshopSubscriptionsTests: MediaPanelTestCase {
       },
       scanStatus: BridgeLibraryScanStatus(scanning: false, done: 0, total: 0), sceneCount: 0,
       videoCount: UInt64(ids.count), webpageCount: 0, unknownCount: 0)
+  }
+
+  /// The Workshop page marks the subscriptions of whoever is signed in now: after a sign-out and
+  /// a new sign-in (here the same account), the next visit reads them again.
+  func testTheWorkshopPageReadsTheMarksAgainForANewSignIn() async throws {
+    let panel = try makePanel(subscribed: ["111": "Video"])
+    try await panel.workshop.signInToSteamWeb {
+      WebSignInCookies(session: "76561198000000001%7C%7C0123456789abcdef0123")
+    }
+    panel.controller.workshopBrowser.pageAppeared()
+    try await waitFor { panel.workshop.subscribedIDs == ["111"] }
+
+    try panel.workshop.signOutOfSteamWeb()
+    SubscriptionsProtocol.subscribed = ["222": "Video"]
+    try await panel.workshop.signInToSteamWeb {
+      WebSignInCookies(session: "76561198000000001%7C%7Cfedcba9876543210fedc")
+    }
+    panel.controller.workshopBrowser.pageAppeared()
+    try await waitFor { panel.workshop.subscribedIDs == ["222"] }
+  }
+
+  /// A marks read that fails says so in the banner, naming what could not be read as well as
+  /// Steam's reason, and the next visit to the page tries again.
+  func testAFailedMarksReadIsReportedAndTriedAgainOnTheNextVisit() async throws {
+    let panel = try makePanel(subscribed: ["111": "Video"])
+    try await panel.workshop.signInToSteamWeb {
+      WebSignInCookies(session: "76561198000000001%7C%7C0123456789abcdef0123")
+    }
+    SubscriptionsProtocol.unreachable = true
+    panel.controller.errors.actionError = nil
+    panel.controller.workshopBrowser.pageAppeared()
+    try await waitFor { panel.controller.errors.actionError != nil }
+    let message = try XCTUnwrap(panel.controller.errors.actionError)
+    let reason = URLError(.notConnectedToInternet).localizedDescription
+    XCTAssertTrue(message.hasSuffix(reason), "Steam's reason ends the line: \(message)")
+    XCTAssertGreaterThan(message.count, reason.count, "the line also says what could not be read")
+    XCTAssertEqual(panel.workshop.subscribedIDs, [])
+    XCTAssertNotNil(panel.workshop.steamWebSession, "a connection failure keeps the sign-in")
+
+    SubscriptionsProtocol.unreachable = false
+    panel.controller.workshopBrowser.pageAppeared()
+    try await waitFor { panel.workshop.subscribedIDs == ["111"] }
   }
 
   func testOnlyWhatTheLibraryLacksIsRequestedAndApplicationsAreSkipped() async throws {
@@ -91,9 +136,9 @@ final class PanelWorkshopSubscriptionsTests: MediaPanelTestCase {
 
   // MARK: Import my subscriptions
 
-  /// The welcome guide's and the one-time offer's import signs in to Steam Community first, then
-  /// queues what the library lacks. A sign-in window closed first changes nothing and leaves the
-  /// offer open; signing in spends it, since whoever signed in found the feature.
+  /// The one-time offer's import signs in to Steam Community first, then queues what the library
+  /// lacks. A sign-in window closed first changes nothing and leaves the offer open; signing in
+  /// spends it, since whoever signed in found the feature.
   func testImportSignsInFirstThenQueuesWhatTheLibraryLacks() async throws {
     let prompt = SupportPromptStore(defaults: try TemporaryDefaults.make(for: self).defaults)
     let panel = try makePanel(subscribed: ["111": "Video", "333": "Scene"], supportPrompt: prompt)
@@ -111,23 +156,6 @@ final class PanelWorkshopSubscriptionsTests: MediaPanelTestCase {
     XCTAssertEqual(queued, 1)
     XCTAssertEqual(panel.workshop.downloadRequests.map(\.id), ["333"])
     XCTAssertNil(prompt.pendingPrompt(welcomeSeen: true, telemetryOn: true, steamSignedIn: true))
-  }
-
-  /// The guide's card says what the import did: how many went to Downloads, or that the library
-  /// already has them all.
-  func testTheGuideReportsWhatTheImportQueued() async throws {
-    let panel = try makePanel(subscribed: ["111": "Video", "333": "Scene"])
-    panel.store.librarySnapshot = installed(["111"])
-    let guide = panel.controller.welcome
-    XCTAssertFalse(guide.isSignedInToSteamCommunity)
-    await guide.importSubscriptions()
-    XCTAssertEqual(guide.subscriptionImport, .queued(1))
-    XCTAssertTrue(guide.isSignedInToSteamCommunity)
-    XCTAssertNil(guide.error)
-
-    panel.store.librarySnapshot = installed(["111", "333"])
-    await guide.importSubscriptions()
-    XCTAssertEqual(guide.subscriptionImport, .upToDate)
   }
 
   /// The offer to someone who never met the import: choosing it spends the offer at once, then the
@@ -160,6 +188,8 @@ private actor Gate {
 /// Steam: the subscriptions profile page of one account, and the details of any item asked about.
 private final class SubscriptionsProtocol: URLProtocol, @unchecked Sendable {
   nonisolated(unsafe) static var subscribed: [String: String] = [:]
+  /// The subscriptions page cannot be reached while this is set.
+  nonisolated(unsafe) static var unreachable = false
 
   override class func canInit(with request: URLRequest) -> Bool { true }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -179,6 +209,7 @@ private final class SubscriptionsProtocol: URLProtocol, @unchecked Sendable {
 
   private static func body(for url: URL, request: URLRequest) -> Data? {
     if url.host == "steamcommunity.com", url.path.contains("myworkshopfiles") {
+      if unreachable { return nil }
       // Without the session cookie Steam shows its sign-in page.
       guard request.value(forHTTPHeaderField: "Cookie")?.hasPrefix("steamLoginSecure=") == true else {
         return Data("<html><head><title>Sign In</title></head><body></body></html>".utf8)

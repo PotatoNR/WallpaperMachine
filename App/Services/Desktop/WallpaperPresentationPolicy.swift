@@ -34,7 +34,7 @@ enum GlobalPresentation: Comparable, Sendable {
 }
 
 /// Suspends wallpaper presentation per display while no pixel from that display
-/// can reach the user, or, unless the user chose to keep it running, while
+/// can reach the user, or, when the user chose to pause for it, while
 /// other windows cover that display's working area, or, if the user chose to
 /// play only where they are working, while the pointer is on another display
 /// that still shows its wallpaper; and globally only for conditions that really
@@ -44,12 +44,23 @@ enum GlobalPresentation: Comparable, Sendable {
 ///
 /// The split matters for power: a window covering the wallpaper on one display
 /// must stop that display's decoding and rendering, and must not stop a display
-/// the user is still looking at. Display sleep, session lock, app rules and
-/// other-app audio can also suspend or unload every display, and mute wallpaper
+/// the user is still looking at. Display sleep, session lock, a session switched away
+/// from (fast user switching), app rules and other-app audio can also suspend or unload
+/// every display, and mute wallpaper
 /// audio, without touching that choice. The user's own mute of every wallpaper silences them
 /// as well, whatever the rules say, and leaves each wallpaper's saved sound alone.
 ///
-/// A third channel, beside presentation and audio, carries the conditions that chose Reduced
+/// Other-app audio can instead turn wallpapers down: a gain (`audioGain`) every wallpaper's own
+/// volume is multiplied by while that sound lasts. It is a channel of its own beside the mute, so
+/// a mute from anywhere still silences, and no saved volume is rewritten.
+///
+/// A covered desktop can act on sound instead of pausing (`DesktopCoveredAction.mute` and
+/// `.reduceVolume`). The mute and the gain reach every display at once, so that choice holds only
+/// while other windows cover the working area of every display whose wallpaper is in view
+/// (`isDesktopCoveredForSound`): a wallpaper still in view anywhere keeps its sound. It waits for
+/// the same settle as a covered display's pause, and uncovering any of them lifts it at once.
+///
+/// A further channel, beside presentation and audio, carries the conditions that chose Reduced
 /// quality (`QualityReduction`): wallpapers keep presenting, only at a lower frame-rate ceiling
 /// and render scale. It is decided and acknowledged on its own, never changes
 /// `globalPresentation` or `suspendedDisplayIDs`, and is released on `stop()`.
@@ -61,14 +72,20 @@ final class WallpaperPresentationPolicy {
     private let lockCenter: NotificationCenter
     private let windowCenter: NotificationCenter
     private let surfaces: @MainActor () -> [WallpaperSurfaceVisibility]
-    private let isSessionLocked: @MainActor () -> Bool
+    private let sessionState: @MainActor () -> WallpaperPresentationAuthority.SessionState
     private let displaySleepAction: @MainActor () -> DisplaySleepAction
     private let appRuleActions: @MainActor () -> Set<AppRuleAction>
     private let otherAudioActive: @MainActor () -> Bool
     private let otherAudioAction: @MainActor () -> OtherAudioAction
+    /// The share of its own volume a wallpaper keeps under Reduce volume, from 0 to 1: one level
+    /// for other-app sound and for a covered desktop.
+    private let otherAudioVolume: @MainActor () -> Float
     private let userMuted: @MainActor () -> Bool
     private let desktopCoveredAction: @MainActor () -> DesktopCoveredAction
+    private let keepsCoverageProbes: @MainActor () -> Bool
     private let coveredDisplays: @MainActor () -> Set<UInt32>
+    /// The last Space snapshot, not a window-server query during an occlusion callback.
+    private let nonDesktopDisplays: @MainActor () -> Set<UInt32>
     private let inactiveDisplays: @MainActor (Set<UInt32>) -> Set<UInt32>
     private let screenLayout: @MainActor () -> [NSRect]
     private let requestedQualityReductions: @MainActor () -> Set<QualityReduction>
@@ -78,6 +95,7 @@ final class WallpaperPresentationPolicy {
     private let counters: RuntimeCounters
     private let applyGlobal: @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void
     private let applyAudio: @MainActor (Bool, @escaping ApplyCompletion) -> Void
+    private let applyAudioGain: @MainActor (Float, @escaping ApplyCompletion) -> Void
     private let applyQuality: @MainActor (Set<QualityReduction>, @escaping ApplyCompletion) -> Void
     private let applyDisplay: @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
 
@@ -87,8 +105,13 @@ final class WallpaperPresentationPolicy {
     /// synchronous round trip, and evaluate() runs after every snapshot the engine
     /// applies, so it is asked again only where the answer can have changed: a lock
     /// or unlock, waking displays, a user switch, and every evaluation while the
-    /// session counts as locked, so a stale lock can never hold the wallpaper.
+    /// session counts as locked or switched away, so a stale answer can never hold the
+    /// wallpaper.
     private var sessionLocked = false
+    /// False while fast user switching has another session (or the login window) on the
+    /// screens, read from the same answer as the lock. A session whose answer leaves the
+    /// key out counts as on the console.
+    private var sessionOnConsole = true
     /// Set until the first evaluation, which covers a session locked before start().
     private var sessionLockStale = true
     /// The screens and working areas the last screen change found.
@@ -96,6 +119,9 @@ final class WallpaperPresentationPolicy {
     private var settle: Task<Void, Never>?
     private var appliedGlobal: GlobalPresentation? = .running
     private var appliedAudio: Bool? = false
+    /// The gain the bridge was last told; it starts at each wallpaper's own volume. Nil after a
+    /// failed delivery. Compared as a number, so a new level is sent while the rule already holds.
+    private var appliedAudioGain: Float? = 1
     /// What the bridge was last told to reduce for; it starts unthrottled. Nil after a failed delivery.
     private var appliedQuality: Set<QualityReduction>? = []
     /// Acknowledged state per display. A display with no entry has never been
@@ -110,8 +136,18 @@ final class WallpaperPresentationPolicy {
     private var deliveryInFlight = false
     /// Conditions under which no display at all can present, and how hard.
     private(set) var globalPresentation: GlobalPresentation = .running
-    /// Wallpaper audio held down by the user's mute of every wallpaper, a mute rule or other-app audio.
+    /// Wallpaper audio held down by the user's mute of every wallpaper, a mute rule, a covered
+    /// desktop or other-app audio.
     private(set) var isAudioSuppressed = false
+    /// What every wallpaper's own volume is multiplied by: 1 unless another app plays sound or
+    /// windows cover the desktop, and the user chose to turn wallpapers down for it.
+    private(set) var audioGain: Float = 1
+    /// Other windows have covered the working area of every display whose wallpaper is in view for
+    /// the settle delay, while the covered-desktop choice acts on sound. Kept while no wallpaper is
+    /// in view at all (a full-screen app, sleeping displays, or covered displays that the choice,
+    /// changed to Pause, now pauses), so none of those brings a burst of sound; cleared at once
+    /// when a wallpaper is in view uncovered or the choice becomes Keep running.
+    private(set) var isDesktopCoveredForSound = false
     /// The conditions asking for the reduced-quality profile, whatever presentation does.
     private(set) var qualityReductions: Set<QualityReduction> = []
     /// Displays suspended on their own, by occlusion or a covered working area.
@@ -120,6 +156,12 @@ final class WallpaperPresentationPolicy {
     /// True when presentation is suspended or unloaded. Occlusion of one display
     /// does not set this.
     var isSuspended: Bool { globalPresentation != .running }
+
+    /// Nobody is at the Mac: the displays sleep or the session is locked. An app rule or the
+    /// Focus filter suspends presentation too, but while someone works. A session switched away
+    /// from the console pauses its wallpapers but does not count: someone may still be watching
+    /// it remotely, and an automatic update must not restart it then.
+    var isUnattended: Bool { displaysAsleep || sessionLocked }
 
     /// The suspended displays that something hides from the user (a full-screen app, a covered
     /// working area), leaving out the ones paused only because they chose to play where they work
@@ -152,6 +194,10 @@ final class WallpaperPresentationPolicy {
     /// when `start()` ran (nothing was seen to unlock), nor for `stop()`. Callers must only read
     /// the policy from it: it runs inside `evaluate()`.
     var onSessionUnlocked: (@MainActor () -> Void)?
+    /// Called after an evaluation that finds `isUnattended` changed since the last one reported.
+    /// Like `onSessionUnlocked`, it runs inside `evaluate()`, so callers must only read the policy.
+    var onAttendanceChanged: (@MainActor () -> Void)?
+    private var reportedUnattended = false
 
     /// Between `start()` and `stop()`.
     private var isRunning: Bool { !observers.isEmpty }
@@ -164,14 +210,17 @@ final class WallpaperPresentationPolicy {
         lockCenter: NotificationCenter = DistributedNotificationCenter.default(),
         windowCenter: NotificationCenter = .default,
         surfaces: (@MainActor () -> [WallpaperSurfaceVisibility])? = nil,
-        isSessionLocked: (@MainActor () -> Bool)? = nil,
+        sessionState: (@MainActor () -> WallpaperPresentationAuthority.SessionState)? = nil,
         displaySleepAction: (@MainActor () -> DisplaySleepAction)? = nil,
         appRuleActions: (@MainActor () -> Set<AppRuleAction>)? = nil,
         otherAudioActive: (@MainActor () -> Bool)? = nil,
         otherAudioAction: (@MainActor () -> OtherAudioAction)? = nil,
+        otherAudioVolume: (@MainActor () -> Float)? = nil,
         userMuted: (@MainActor () -> Bool)? = nil,
         desktopCoveredAction: (@MainActor () -> DesktopCoveredAction)? = nil,
+        keepsCoverageProbes: (@MainActor () -> Bool)? = nil,
         coveredDisplays: (@MainActor () -> Set<UInt32>)? = nil,
+        nonDesktopDisplays: (@MainActor () -> Set<UInt32>)? = nil,
         inactiveDisplays: (@MainActor (Set<UInt32>) -> Set<UInt32>)? = nil,
         screenLayout: (@MainActor () -> [NSRect])? = nil,
         qualityReductions: (@MainActor () -> Set<QualityReduction>)? = nil,
@@ -179,6 +228,7 @@ final class WallpaperPresentationPolicy {
         counters: RuntimeCounters? = nil,
         applyGlobal: @escaping @MainActor (GlobalPresentation, @escaping ApplyCompletion) -> Void,
         applyAudio: (@MainActor (Bool, @escaping ApplyCompletion) -> Void)? = nil,
+        applyAudioGain: (@MainActor (Float, @escaping ApplyCompletion) -> Void)? = nil,
         applyQuality: (@MainActor (Set<QualityReduction>, @escaping ApplyCompletion) -> Void)? = nil,
         applyDisplay: @escaping @MainActor (UInt32, Bool, @escaping ApplyCompletion) -> Void
     ) {
@@ -186,13 +236,15 @@ final class WallpaperPresentationPolicy {
         self.lockCenter = lockCenter
         self.windowCenter = windowCenter
         self.surfaces = surfaces ?? { Self.systemSurfaces() }
-        self.isSessionLocked = isSessionLocked ?? { Self.sessionIsLocked() }
+        self.sessionState = sessionState ?? { .current() }
         self.displaySleepAction = displaySleepAction ?? { .pause }
         self.appRuleActions = appRuleActions ?? { [] }
         self.otherAudioActive = otherAudioActive ?? { false }
         self.otherAudioAction = otherAudioAction ?? { .keepRunning }
+        self.otherAudioVolume = otherAudioVolume ?? { 1 }
         self.userMuted = userMuted ?? { false }
         self.desktopCoveredAction = desktopCoveredAction ?? { .keepRunning }
+        self.keepsCoverageProbes = keepsCoverageProbes ?? { false }
         if let coveredDisplays {
             self.coveredDisplays = coveredDisplays
             probes = nil
@@ -204,6 +256,7 @@ final class WallpaperPresentationPolicy {
             self.coveredDisplays = { [] }
             probes = nil
         }
+        self.nonDesktopDisplays = nonDesktopDisplays ?? { [] }
         self.inactiveDisplays = inactiveDisplays ?? { _ in [] }
         self.screenLayout = screenLayout ?? { Self.systemScreenLayout() }
         requestedQualityReductions = qualityReductions ?? { [] }
@@ -211,6 +264,7 @@ final class WallpaperPresentationPolicy {
         self.counters = counters ?? .shared
         self.applyGlobal = applyGlobal
         self.applyAudio = applyAudio ?? { _, completion in completion(.success(())) }
+        self.applyAudioGain = applyAudioGain ?? { _, completion in completion(.success(())) }
         self.applyQuality = applyQuality ?? { _, completion in completion(.success(())) }
         self.applyDisplay = applyDisplay
     }
@@ -233,7 +287,8 @@ final class WallpaperPresentationPolicy {
                 }
             }))
         }
-        // Switching users away and back changes the session without a lock notification.
+        // Switching users away and back changes the session without a lock notification:
+        // away, another session has the screens; back, this one has them again.
         for name in [
             NSWorkspace.sessionDidResignActiveNotification,
             NSWorkspace.sessionDidBecomeActiveNotification,
@@ -256,6 +311,13 @@ final class WallpaperPresentationPolicy {
         // from every wallpaper window anyway.
         observers.append((windowCenter, windowCenter.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.evaluate() }
+        }))
+        // AppKit can expose a desktop preview before leaving a full-screen Space. Wait for
+        // the monitor's updated topology, then evaluate even if visibility never changes again.
+        observers.append((windowCenter, windowCenter.addObserver(
+            forName: WallpaperSpaceMonitor.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.evaluate() }
         }))
@@ -292,25 +354,30 @@ final class WallpaperPresentationPolicy {
         probes?.removeAll()
         displaysAsleep = false
         sessionLocked = false
+        sessionOnConsole = true
         sessionLockStale = true
         evaluatedScreenLayout = nil
-        // Teardown must never leave a surface suspended or muted.
+        // Teardown must never leave a surface suspended, muted or turned down.
         pendingDisplays.formUnion(suspendedDisplayIDs)
         suspendedDisplayIDs.removeAll()
         globalPresentation = .running
         isAudioSuppressed = false
+        audioGain = 1
+        isDesktopCoveredForSound = false
         qualityReductions = []
         deliverPending()
     }
 
     /// Every window kind that hosts wallpaper pixels: the renderer's Metal
-    /// window, the web wallpaper window, and the native video window. A backend
+    /// window, the web wallpaper window, and the two native video windows (AVFoundation's and the
+    /// WebM player's). A backend
     /// missing from this list is invisible to occlusion tracking, so its
     /// display would never be suspended or resumed.
     static let wallpaperWindowClassNames = [
         "MWEWallpaperDesktopWindow",
         "MWEWebWallpaperDesktopWindow",
         "MWENativeVideoDesktopWindow",
+        "MWEWebMVideoDesktopWindow",
     ]
 
     static func isWallpaperWindow(_ window: NSWindow) -> Bool {
@@ -335,10 +402,7 @@ final class WallpaperPresentationPolicy {
     static func systemSurfaces() -> [WallpaperSurfaceVisibility] {
         var visibility: [UInt32: Bool] = [:]
         for window in wallpaperWindows() {
-            guard let screen = window.screen,
-                  let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-            else { continue }
-            let displayID = number.uint32Value
+            guard let displayID = window.screen.flatMap(SystemDisplays.id(of:)) else { continue }
             let visible = window.occlusionState.contains(.visible)
             visibility[displayID] = (visibility[displayID] ?? false) || visible
         }
@@ -350,11 +414,6 @@ final class WallpaperPresentationPolicy {
     /// Each screen's frame and working area: what the coverage probes cover.
     static func systemScreenLayout() -> [NSRect] {
         NSScreen.screens.flatMap { [$0.frame, $0.visibleFrame] }
-    }
-
-    static func sessionIsLocked() -> Bool {
-        (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
-            ?? false
     }
 
     /// Wallpaper visibility with a covered working area counted as hidden when
@@ -377,6 +436,9 @@ final class WallpaperPresentationPolicy {
     /// pauses, other windows over that area.
     private func hiddenFromView(_ current: [WallpaperSurfaceVisibility]) -> Set<UInt32> {
         var hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
+        // A Mission Control preview is not an active desktop, even when AppKit calls its
+        // wallpaper visible. Keep its last frame until that display leaves the full-screen Space.
+        hidden.formUnion(nonDesktopDisplays())
         if desktopCoveredAction() == .pause { hidden.formUnion(coveredDisplays()) }
         return hidden
     }
@@ -400,11 +462,37 @@ final class WallpaperPresentationPolicy {
         return unusedDisplays(in: current, hidden: hidden).subtracting(hidden)
     }
 
-    /// Probes exist only while a covered desktop pauses, so keeping the
-    /// wallpaper running costs no extra windows.
+    /// What windows do to the wallpapers in view, for a covered-desktop choice that acts on sound:
+    /// true while they cover the working area of every display whose wallpaper is in view (on
+    /// screen and not paused for a full-screen app or for the user working elsewhere), false while
+    /// one of those is uncovered or the choice is Keep running, and nil while no wallpaper is in
+    /// view at all, which leaves the last answer standing. Under Pause a covered display is out of
+    /// view already, so it is never true, and a desktop covered while the choice changed to Pause
+    /// stays quiet until a wallpaper shows uncovered.
+    private func soundCoverage(_ current: [WallpaperSurfaceVisibility]) -> Bool? {
+        let action = desktopCoveredAction()
+        guard action.watchesCoverage else { return false }
+        let inView = Set(current.filter(\.isVisible).map(\.displayID))
+        guard !inView.isEmpty else { return nil }
+        return action.actsOnSound && inView.isSubset(of: coveredDisplays())
+    }
+
+    /// Windows have covered every wallpaper in view for the settle delay: the covered-desktop
+    /// choice now mutes or turns down every wallpaper.
+    private func coverSound() {
+        guard !isDesktopCoveredForSound else { return }
+        isDesktopCoveredForSound = true
+        AppLog.info("windows cover every wallpaper in view")
+        adoptAudio()
+    }
+
+    /// Probes exist only while a covered desktop pauses or acts on sound, or while
+    /// `keepsCoverageProbes` asks for their occlusion changes (the sign `AppRuleMonitor` takes
+    /// that the app in front lost or regained its windows), so keeping the wallpaper running costs
+    /// no extra windows otherwise. Kept for that alone, a covered probe pauses nothing.
     private func syncProbes() {
         guard let probes, !observers.isEmpty else { return }
-        if desktopCoveredAction() == .pause {
+        if desktopCoveredAction().watchesCoverage || keepsCoverageProbes() {
             probes.sync()
         } else {
             probes.removeAll()
@@ -416,21 +504,52 @@ final class WallpaperPresentationPolicy {
         // Reported when evaluate() returns, whichever path it takes, so `globalPresentation` is
         // already settled for the callback.
         var unlocked = false
-        defer { if unlocked { onSessionUnlocked?() } }
+        defer {
+            if unlocked { onSessionUnlocked?() }
+            if isUnattended != reportedUnattended {
+                reportedUnattended = isUnattended
+                onAttendanceChanged?()
+            }
+        }
         syncProbes()
-        if sessionLockStale || sessionLocked {
+        if sessionLockStale || sessionLocked || !sessionOnConsole {
             let wasLocked = sessionLocked
-            sessionLocked = isSessionLocked()
+            let wasOnConsole = sessionOnConsole
+            let session = sessionState()
+            sessionLocked = session.locked
+            sessionOnConsole = session.onConsole
             sessionLockStale = false
             unlocked = wasLocked && !sessionLocked
             if unlocked { AppLog.info("session unlocked") }
+            if wasOnConsole != sessionOnConsole {
+                AppLog.info(sessionOnConsole ? "session is on the console again" : "session switched away from the console")
+            }
         }
         let presentation = resolvedPresentation()
-        let audio = resolvedAudioSuppressed()
         let quality = requestedQualityReductions()
         let current = currentSurfaces()
         let hidden = Set(current.filter { !$0.isVisible }.map(\.displayID))
         let known = Set(current.map(\.displayID))
+        // A covered desktop that acts on sound lets go at once and takes hold after the settle,
+        // as a covered display's pause does.
+        let coverage = soundCoverage(current)
+        if coverage == false, isDesktopCoveredForSound {
+            isDesktopCoveredForSound = false
+            AppLog.info("a wallpaper in view is uncovered")
+        }
+        // A covered wallpaper resuming from any per-display pause must take the sound setting
+        // first (including Pause -> Mute/Reduce volume). Another settle would let it play at full
+        // volume meanwhile, even if a sibling display only just became covered. With no paused
+        // wallpaper resuming, sound keeps the ordinary coverage settle below. A disconnect clears
+        // the desired pause but retains the acknowledged or unknown bridge state, so include the
+        // same retained pauses that reconciliation below can resume.
+        if coverage == true, !isDesktopCoveredForSound,
+           known.subtracting(hidden).contains(where: {
+               suspendedDisplayIDs.contains($0) || appliedDisplays[$0] == true || failedDisplays.contains($0)
+           }) {
+            coverSound()
+        }
+        let coversSound = coverage == true && !isDesktopCoveredForSound
         settle?.cancel()
         settle = nil
 
@@ -452,32 +571,30 @@ final class WallpaperPresentationPolicy {
             }
         }
 
+        // A wake or unlock may also reveal a display that was suspended on its own.
+        // Adopt both decisions in this evaluation: no later window event is guaranteed.
         if presentation != globalPresentation {
-            commitPlayback(presentation: presentation, audio: audio, quality: quality)
-            return
+            globalPresentation = presentation
+            AppLog.info("presentation \(presentation.logLabel)")
         }
-        let audioChanged = audio != isAudioSuppressed
-        if audioChanged {
-            isAudioSuppressed = audio
-            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
-        }
-        let qualityChanged = adopt(quality: quality)
-        // Resume instantly; delay only occlusion-driven suspension so a Space
-        // switch or a Mission Control pass does not freeze a visible wallpaper.
+        adoptAudio()
+        adopt(quality: quality)
+        // Resume once both visibility and the Space snapshot allow it. Delay suspension so a
+        // brief occlusion or a Mission Control pass does not freeze a visible wallpaper, and
+        // a covered desktop's mute or lower volume so it does not cut the sound.
         let revealed = suspendedDisplayIDs.subtracting(hidden)
         let newlyHidden = hidden.subtracting(suspendedDisplayIDs)
         if !revealed.isEmpty {
             suspendedDisplayIDs.subtract(revealed)
             pendingDisplays.formUnion(revealed)
             AppLog.info("presentation resumed for displays \(revealed.sorted())")
-            deliverPending()
-            if newlyHidden.isEmpty { return }
         }
-        guard !newlyHidden.isEmpty else {
+        guard !newlyHidden.isEmpty || coversSound else {
             deliverPending()
             return
         }
         guard occlusionSettleDelay > .zero else {
+            if coversSound { coverSound() }
             commitHidden(newlyHidden)
             return
         }
@@ -485,10 +602,29 @@ final class WallpaperPresentationPolicy {
             guard let self else { return }
             do { try await Task.sleep(for: self.occlusionSettleDelay) } catch { return }
             guard !Task.isCancelled else { return }
-            let stillHidden = Set(self.currentSurfaces().filter { !$0.isVisible }.map(\.displayID))
+            let settled = self.currentSurfaces()
+            if coversSound, self.soundCoverage(settled) == true { self.coverSound() }
+            let stillHidden = Set(settled.filter { !$0.isVisible }.map(\.displayID))
             self.commitHidden(newlyHidden.intersection(stillHidden))
         }
-        if audioChanged || qualityChanged { deliverPending() }
+        deliverPending()
+    }
+
+    /// Takes the audio decisions as they stand now, the mute and then the gain, and logs each
+    /// that changed. Delivery follows from `deliverPending()`.
+    private func adoptAudio() {
+        let audio = resolvedAudioSuppressed()
+        if audio != isAudioSuppressed {
+            isAudioSuppressed = audio
+            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
+        }
+        let gain = resolvedAudioGain()
+        if gain != audioGain {
+            audioGain = gain
+            AppLog.info(gain < 1
+                ? "wallpaper volume reduced to \(Int((gain * 100).rounded()))%"
+                : "wallpaper volume restored")
+        }
     }
 
     private func resolvedPresentation() -> GlobalPresentation {
@@ -496,7 +632,8 @@ final class WallpaperPresentationPolicy {
         if displaysAsleep {
             strongest = max(strongest, displaySleepAction() == .stop ? .unloaded : .suspended)
         }
-        if sessionLocked {
+        // Another session on the screens hides every display as a lock does.
+        if sessionLocked || !sessionOnConsole {
             strongest = max(strongest, .suspended)
         }
         let rules = appRuleActions()
@@ -511,25 +648,29 @@ final class WallpaperPresentationPolicy {
         return strongest
     }
 
-    /// The user's mute holds on its own; the rules and other-app audio each hold too, so turning
-    /// the user's mute off while one of them still applies keeps the wallpapers silent.
+    /// The user's mute holds on its own; the rules, a covered desktop and other-app audio each hold
+    /// too, so turning the user's mute off while one of them still applies keeps the wallpapers
+    /// silent.
     private func resolvedAudioSuppressed() -> Bool {
         if userMuted() { return true }
         if appRuleActions().contains(.mute) { return true }
+        // Pause holds the silence of a desktop that was already covered while its covered
+        // displays wait out the settle, instead of letting the sound out for that second.
+        if isDesktopCoveredForSound, [.mute, .pause].contains(desktopCoveredAction()) { return true }
         return otherAudioActive() && otherAudioAction() == .mute
     }
 
-    private func commitPlayback(presentation: GlobalPresentation, audio: Bool, quality: Set<QualityReduction>) {
-        if presentation != globalPresentation {
-            globalPresentation = presentation
-            AppLog.info("presentation \(presentation.logLabel)")
-        }
-        if audio != isAudioSuppressed {
-            isAudioSuppressed = audio
-            AppLog.info("wallpaper audio \(audio ? "suppressed" : "restored")")
-        }
-        adopt(quality: quality)
-        deliverPending()
+    /// Other-app audio and a covered desktop turn wallpapers down, each only when that is the
+    /// choice made for it, and both to the one shared level, so when both hold the volume is not
+    /// lowered twice. Mute and Pause act through their own channels at the volume each wallpaper
+    /// saved. A level outside 0 to 1 is held to the nearest end, so the bridge is never handed one
+    /// it refuses.
+    private func resolvedAudioGain() -> Float {
+        let forOtherAudio = otherAudioActive() && otherAudioAction() == .reduceVolume
+        let forCoveredDesktop = isDesktopCoveredForSound && desktopCoveredAction() == .reduceVolume
+        guard forOtherAudio || forCoveredDesktop else { return 1 }
+        let level = otherAudioVolume()
+        return level.isFinite ? min(max(level, 0), 1) : 1
     }
 
     /// Takes the conditions' current request as the decision, and says whether it changed.
@@ -556,8 +697,9 @@ final class WallpaperPresentationPolicy {
 
     private func deliverPending() {
         guard !deliveryInFlight else { return }
-        // The global condition is the coarser one, so it goes first. Audio
-        // and quality follow, then per-display occlusion, one acknowledgement at a time.
+        // The global condition is the coarser one, so it goes first. Audio (a mute before
+        // the gain, its release after a lower one) and quality follow, then per-display
+        // occlusion, one acknowledgement at a time.
         if appliedGlobal != globalPresentation {
             let presentation = globalPresentation
             let resumes = isRunning && presentation == .running && appliedGlobal != .running
@@ -581,18 +723,33 @@ final class WallpaperPresentationPolicy {
             }
             return
         }
-        if appliedAudio != isAudioSuppressed {
-            let suppressed = isAudioSuppressed
+        // A mute goes before a new gain, and its release waits for any gain that could be louder
+        // than the decision, so sound never plays for a moment above it (Mute to Reduce volume,
+        // say). A gain the bridge refused is unknown, so the release waits for it unless the
+        // decision is full volume, which no gain exceeds.
+        let releasesMute = appliedAudio != isAudioSuppressed && !isAudioSuppressed
+        let gainNoLouder = appliedAudioGain.map { $0 <= audioGain } ?? (audioGain >= 1)
+        if appliedAudio != isAudioSuppressed, !releasesMute || gainNoLouder {
+            deliverAudioSuppression()
+            return
+        }
+        if appliedAudioGain != audioGain {
+            let gain = audioGain
             deliveryInFlight = true
-            applyAudio(suppressed) { [self] result in
+            applyAudioGain(gain) { [self] result in
                 deliveryInFlight = false
                 guard case .success = result else {
-                    appliedAudio = nil
+                    // Kept pending like the others: a later evaluation sends it again.
+                    appliedAudioGain = nil
                     return
                 }
-                appliedAudio = suppressed
+                appliedAudioGain = gain
                 deliverPending()
             }
+            return
+        }
+        if appliedAudio != isAudioSuppressed {
+            deliverAudioSuppression()
             return
         }
         if appliedQuality != qualityReductions {
@@ -642,6 +799,20 @@ final class WallpaperPresentationPolicy {
                 deliverPending()
             }
             return
+        }
+    }
+
+    private func deliverAudioSuppression() {
+        let suppressed = isAudioSuppressed
+        deliveryInFlight = true
+        applyAudio(suppressed) { [self] result in
+            deliveryInFlight = false
+            guard case .success = result else {
+                appliedAudio = nil
+                return
+            }
+            appliedAudio = suppressed
+            deliverPending()
         }
     }
 

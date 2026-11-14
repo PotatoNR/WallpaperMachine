@@ -1,20 +1,48 @@
 import SwiftUI
 
-/// The strip above a page that reports what needs the person's attention: the error line, and the
-/// wallpapers WallpaperMachine held back after crashing. Nothing is drawn, and no room is kept,
-/// while there is nothing to report.
+/// The strip above a page that reports what needs the person's attention: the error line, the
+/// library's drive while it is disconnected, and the wallpapers WallpaperMachine held back after
+/// crashing. Nothing is drawn, and no room is kept, while there is nothing to report.
 struct PanelBanners: View {
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     // The download failure shares the banner: the page showed one line, the first of the two.
     let message = controller.errors.message ?? controller.errors.downloadMessage
+    let drive = controller.libraryDriveMessage
     let held = controller.heldWallpapers
-    let hasContent = message != nil || !held.isEmpty
+    let update = AppUpdateNotice(store: controller.updater)
+    let showsUpdate = update != nil && !controller.updater.isDeferred
+      && (controller.updater.state.availableVersion == nil
+        || controller.updater.state.availableVersion != controller.updater.skippedVersion)
+    let hasContent = message != nil || drive != nil || !held.isEmpty || showsUpdate
     VStack(spacing: 8) {
+      if showsUpdate, let update {
+        // The panel's accent, as text: the row draws its message in the tint, so it takes the
+        // colour fitted for text on the surface, not the system accent.
+        BannerRow(systemImage: "arrow.down.circle", tint: theme.accent.accent.color, message: update.title) {
+          Button("View update") {
+            controller.launch(PanelActionCoordinator.key("openUpdates")) {
+              try await controller.openSettings(.about)
+            }
+          }
+          Button(update.kind == .installed ? L("Dismiss") : L("Remind Me Later")) {
+            controller.launch(PanelActionCoordinator.key("deferUpdate")) {
+              if update.kind == .installed { try await controller.dismissRecentUpdate() }
+              else { try await controller.postponeUpdate() }
+            }
+          }
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier("app-update-banner")
+      }
       if let message {
         ErrorBanner(message: message) { controller.dismissError() }
+      }
+      if let drive {
+        LibraryDriveBanner(message: drive)
       }
       HeldWallpaperRows(rows: held)
     }
@@ -40,13 +68,15 @@ private struct ErrorBanner: View {
       systemImage: "exclamationmark.triangle.fill", tint: theme.surface.danger.color,
       message: message
     ) {
+      // The frame and the hit shape belong to the label: outside it, a plain button still takes
+      // clicks only on the glyph's own pixels.
       Button(action: dismiss) {
         Image(systemName: "xmark").font(.system(size: 10.5, weight: .bold))
+          .frame(width: 24, height: 24)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .foregroundStyle(theme.surface.danger.color)
-      .frame(width: 22, height: 22)
-      .contentShape(Rectangle())
       .help(L("Dismiss error"))
       .accessibilityLabel(Text(verbatim: L("Dismiss error")))
       .accessibilityIdentifier("dismiss-error")
@@ -59,6 +89,27 @@ private struct ErrorBanner: View {
   /// A failure that appears while VoiceOver is elsewhere is spoken, as an `alert` role was.
   private func announce() {
     AccessibilityNotification.Announcement(message).post()
+  }
+}
+
+/// The library's drive was ejected or unplugged while the app ran. A warning with nothing to press:
+/// connecting the drive is the remedy, and the row goes once its wallpapers play again. It is
+/// spoken once when it appears.
+private struct LibraryDriveBanner: View {
+  let message: String
+
+  @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
+
+  var body: some View {
+    BannerRow(
+      systemImage: "externaldrive.badge.exclamationmark", tint: theme.surface.warning.color,
+      message: message
+    ) {
+      EmptyView()
+    }
+    .accessibilityIdentifier("library-drive-banner")
+    .onAppear { controller.shell.announce(message) }
   }
 }
 
@@ -115,11 +166,12 @@ private struct BannerRow<Trailing: View>: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 8)
     .frame(minWidth: 0)
-    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .strokeBorder(tint.opacity(0.3), lineWidth: 0.5)
-    }
+    .background(tint.opacity(0.12), in: shape)
+    .overlay { shape.strokeBorder(tint.opacity(0.3), lineWidth: 0.5) }
     .accessibilityElement(children: .contain)
+  }
+
+  private var shape: RoundedRectangle {
+    RoundedRectangle(cornerRadius: PanelCardSurface.cornerRadius, style: .continuous)
   }
 }

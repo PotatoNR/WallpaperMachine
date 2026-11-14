@@ -184,7 +184,54 @@ final class WorkshopBrowserRenderTests: MediaPanelTestCase {
     let found = identifiers(in: host.hosting.view)
     XCTAssertFalse(found.contains("workshop-page-field"), "an empty state stands alone, without a pager")
     XCTAssertFalse(found.contains("workshop-next-page"))
+
+    // The same search once the filters are back at their defaults: only the search is to blame.
+    // Clearing the filters searches the id again; that search settles before the next one starts.
+    model.clearFilters()
+    try await waitFor {
+      panel.workshop.excludedTags == WorkshopStore.defaultExcludedTags && !controller.workshopBrowse.isLoading
+    }
+    model.edit(text: "aurora")
+    model.search()
+    try await waitFor {
+      WorkshopBrowseProtocol.requests.contains { WorkshopBrowseProtocol.values("searchtext", in: $0) == "aurora" }
+        && !controller.workshopBrowse.isLoading && controller.workshopBrowse.errorMessage == nil
+    }
+    XCTAssertEqual(model.filterCount, 0, "the default exclusions are no filter to remove")
+    XCTAssertEqual(
+      WorkshopEmptyState.make(
+        browse: controller.workshopBrowse, draftText: model.text, filterCount: model.filterCount),
+      .noResults(.clearSearch))
+    try await settle(host, size: size)
+    assertFits(host, size, "a search alone")
     host.close()
+  }
+
+  /// A first fetch shows the same ring as the Library's first read, which stops in a hidden window
+  /// and with Reduce Motion, never the system spinner, which keeps turning. The empty state is
+  /// hosted alone because Steam's answer here never keeps the page loading long enough to look.
+  func testTheLoadingGridShowsThePanelsRingAndNoSystemSpinner() async throws {
+    let controller = try makeDiscoverPanel().controller
+    let view = NSHostingView(
+      rootView: AnyView(
+        WorkshopEmptyStateView(state: .loading, filtersAreOpen: false)
+          .environment(controller)
+          .environment(\.panelIsVisible, true)
+          .panelTheme(theme: controller.theme, locale: PanelLocale.shared)))
+    view.sceneBridgingOptions = []
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 420), styleMask: [.titled],
+      backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = view
+    view.layoutSubtreeIfNeeded()
+    try await Task.sleep(for: .seconds(0.3))
+    view.layoutSubtreeIfNeeded()
+    XCTAssertTrue(
+      AccessibilityElement.everything(in: view).contains { $0.text == L("Loading Workshop") },
+      "the loading state is drawn, so an empty tree cannot pass")
+    XCTAssertEqual(AccessibilityElement.systemProgressIndicators(in: view), [])
+    window.close()
   }
 
   func testTheToolbarGainsTheDownloadsButtonOnceARequestIsWaiting() async throws {
@@ -336,6 +383,35 @@ final class WorkshopBrowserRenderTests: MediaPanelTestCase {
       found.contains("Wallpaper 1, Video, In your library, Approved by Wallpaper Engine, Favorite"),
       "the marks follow in the order they stack")
     XCTAssertTrue(found.contains("Wallpapers"), "the grid is a group VoiceOver names")
+    let tooltips = Set(AccessibilityElement.everything(in: host.hosting.view).map(\.help))
+    XCTAssertTrue(
+      tooltips.isSuperset(of: ["Wallpaper 0", "Wallpaper 1"]),
+      "a caption's tooltip is its whole title, for one its line cuts short")
+    host.close()
+  }
+
+  /// The inspector of a wallpaper in the library leads with an Apply button VoiceOver can reach and
+  /// name (nothing inside the artwork, which VoiceOver skips), and puts Move to Trash after it.
+  func testAnInstalledItemsInspectorOffersApplyToVoiceOverAndPutsTheTrashLast() async throws {
+    let panel = try await makePanel()
+    let controller = panel.controller
+    let items = controller.workshopBrowse.items
+    panel.store.librarySnapshot.wallpapers = [
+      BridgeWallpaperEntry(
+        id: items[1].id, title: "x", kind: .video, supported: true, active: false, selected: false,
+        previewPath: nil)
+    ]
+    panel.workshop.selectedItem = items[1]
+    let host = PanelHost(controller: controller)
+    try await settle(host, size: NSSize(width: 1240, height: 800))
+    try await settle(host) { frame("workshop-inspector-apply", in: host.hosting.view) != nil }
+    let found = elements(in: host.hosting.view)
+    let apply = try XCTUnwrap(
+      found.first { $0.identifier == "workshop-inspector-apply" }, "VoiceOver reaches Apply")
+    XCTAssertFalse(apply.label.isEmpty, "and has a name to read")
+    let trash = try XCTUnwrap(found.first { $0.identifier == "workshop.moveToTrash" }?.frame)
+    // AppKit's y grows upwards: a control further down the inspector has the smaller y.
+    XCTAssertLessThanOrEqual(trash.maxY, apply.frame.minY, "Move to Trash comes after Apply")
     host.close()
   }
 
@@ -414,6 +490,52 @@ final class WorkshopBrowserRenderTests: MediaPanelTestCase {
         XCTAssertLessThanOrEqual(size.height, 640, "\(language) \(resolved.stage): the body scrolls before the dialog outgrows the window")
         XCTAssertGreaterThan(size.height, 120)
       }
+    }
+  }
+
+  /// While Steam is contacted, and while a started download does not know its size yet, the
+  /// dialog shows the panel's bar, which stops in a hidden window and with Reduce Motion, never the
+  /// system's indeterminate bar, which slides on.
+  func testTheDialogWaitsWithThePanelsBarAndNoSystemSpinner() async throws {
+    let panel = try makeDiscoverPanel()
+    let connecting = DownloadRow(
+      id: "222", title: "Rainy Tokyo Window", status: "Connecting…", account: "bobby", isPending: true,
+      isAuthenticating: true)
+    let started = DownloadRow(id: "222", title: "Rainy Tokyo Window", status: "Downloading", isPending: true)
+    let stages: [(DownloadRow, DownloadDialogResolution.Stage?, DownloadDialogResolution.Stage, String)] = [
+      (connecting, nil, .auth, L("Connecting to Steam")),
+      (started, .auth, .started, L("Download in progress")),
+    ]
+    for (job, current, stage, label) in stages {
+      let resolved = try XCTUnwrap(
+        DownloadDialogResolution.resolve(
+          target: "222", request: nil, own: job, sceneAssets: nil, currentStage: current,
+          handoffTarget: nil))
+      XCTAssertEqual(resolved.stage, stage)
+      let session = DownloadsModel.Session(target: "222", account: "bobby", remembersSession: true)
+      let hosting = NSHostingView(
+        rootView: AnyView(
+          DownloadDialogView(session: session, resolution: resolved)
+            .environment(panel.controller)
+            .environment(\.panelImages, panel.controller.images)
+            .environment(\.panelIsVisible, true)
+            .panelTheme(theme: panel.controller.theme, locale: PanelLocale.shared)
+            .frame(width: 460)))
+      hosting.sceneBridgingOptions = []
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 460, height: 640), styleMask: [.titled],
+        backing: .buffered, defer: false)
+      window.isReleasedWhenClosed = false
+      window.contentView = hosting
+      hosting.layoutSubtreeIfNeeded()
+      try await Task.sleep(for: .milliseconds(300))
+      hosting.layoutSubtreeIfNeeded()
+      XCTAssertTrue(
+        AccessibilityElement.everything(in: hosting).contains { $0.text == label },
+        "\(stage): the waiting stage is drawn, so an empty tree cannot pass")
+      XCTAssertEqual(AccessibilityElement.systemProgressIndicators(in: hosting), [], "\(stage)")
+      window.contentView = nil
+      window.close()
     }
   }
 
@@ -529,6 +651,29 @@ final class WorkshopBrowserRenderTests: MediaPanelTestCase {
       panel.workshop.selectedItem = panel.controller.workshopBrowse.items[3]
       let size = fittingSize(WorkshopInspector(), controller: panel.controller, width: 260)
       XCTAssertLessThanOrEqual(size.width, 261, "\(language): the inspector never asks for more than its column")
+    }
+  }
+
+  /// The button an installed wallpaper's inspector leads with keeps its whole label, Apply or the
+  /// longer Reapply, unshrunk, inside the narrowest inspector column's padding in every language.
+  func testAnInstalledItemsApplyButtonKeepsItsWholeLabelInTheNarrowestColumnInEveryLanguage() throws {
+    // The inspector draws its actions 16 points in from either edge of its column.
+    let inner = InspectorColumn<EmptyView>.widths.lowerBound - 2 * 16
+    addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
+    for language in AppLanguage.supported.map(\.tag) {
+      let panel = try makeDiscoverPanel(language: language)
+      PanelLocale.shared.bind(to: panel.controller.appLanguage)
+      XCTAssertEqual(PanelLocale.shared.tag, language, "precondition: drawn in \(language)")
+      for shown in [nil, "222"] {
+        let offer = ApplyOffer(wallpaperID: "222", shownID: shown, canApply: true, isBusy: { _ in false })
+        let width = idealSize(
+          InspectorApplyButton(offer: offer, identifier: "workshop-inspector-apply"),
+          controller: panel.controller
+        ).width
+        let name = offer.reapplies ? "Reapply" : "Apply"
+        XCTAssertGreaterThan(width, 2 * 14 + 40, "\(language) \(name): the label is measured, not only the padding")
+        XCTAssertLessThanOrEqual(width, inner, "\(language) \(name): \(width) points")
+      }
     }
   }
 }

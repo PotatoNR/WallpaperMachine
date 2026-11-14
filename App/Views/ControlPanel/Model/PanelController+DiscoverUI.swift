@@ -1,8 +1,9 @@
 import Foundation
 
 /// Small readings the Steam Workshop page and its inspector need over the typed model: the selected
-/// item, the window's subtitle, the library's own cover for a copy that is installed, and the problem
-/// report of an item that is not installed. The rules are the page's own; nothing here changes state.
+/// item, the window's subtitle, the library's own cover and the apply offer of a copy that is
+/// installed, and the problem report of an item that is not installed. The rules are the page's
+/// own; nothing here changes state.
 extension PanelController {
   /// The item the inspector shows: the selected one, while it is on the page. Selecting something
   /// and then paging away leaves the inspector empty, as it always did.
@@ -17,14 +18,16 @@ extension PanelController {
   ///
   /// It reads only the store's list-level values, never the tiles or the selection, so the window's
   /// title is not redrawn when a tile is selected or a download moves. The source is named as
-  /// `WorkshopBrowseState` names it.
+  /// `WorkshopBrowseState` names it, and a search whose words are still being translated is
+  /// searching, as the page's footer says.
   var workshopTitleSubtitle: String {
     let shown = workshop.source
     let named = workshop.committedQuery?.source == shown ? workshop.sourceTitle : nil
     let source = WorkshopSourceState(
       source: shown, name: named ?? shown.name, canGoBack: !workshop.sourceHistory.isEmpty)
     let summary = WorkshopSummary.make(
-      source: shown, isLoading: workshop.isLoading, isSignedIn: workshop.steamWebSession != nil,
+      source: shown, isLoading: workshop.isLoading || searchTranslation.isTranslating,
+      isSignedIn: workshop.steamWebSession != nil,
       hasLoaded: workshop.hasLoaded, totalCount: workshop.totalCount,
       isLookup: workshop.committedQuery?.itemID != nil, isDegraded: workshop.isDegraded)
     return source.titleSubtitle(summary: summary)
@@ -37,6 +40,20 @@ extension PanelController {
     libraryRow(id: id)?.still
   }
 
+  /// **Apply wallpaper** or **Reapply wallpaper** for a Workshop item in the library: enabled for a
+  /// type the library can name and that runs on a Mac, on a target display that shows a wallpaper
+  /// of its own (not a mirror, not disabled), which is where a double click on its tile applies it
+  /// too (`workshopDoubleClick(for:)`). An item that is not installed gets an offer that is never
+  /// enabled. With two or more displays, its help names the target (`applyTargetName`).
+  func workshopApplyOffer(for item: WorkshopItem) -> ApplyOffer {
+    // An Application, or a type the library cannot name, cannot be applied.
+    let kind = libraryRow(id: item.id)?.kind ?? .unknown
+    return ApplyOffer(
+      wallpaperID: item.id, target: mediaApplyTarget,
+      canRun: item.canRunOnMac && kind != .unknown, targetName: applyTargetName,
+      isBusy: { isBusy($0) })
+  }
+
   /// Whether **Reinstall from Workshop…** is offered for an installed item: a Workshop wallpaper
   /// (its id is the Workshop's number) that runs on macOS, with no download under way and no
   /// request waiting for a prerequisite.
@@ -47,7 +64,7 @@ extension PanelController {
     return steamDownloadRow(for: item.id)?.isPending != true && downloadRequestRow(for: item.id) == nil
   }
 
-  /// GitHub's new-issue form for a Workshop item whose download failed, filled with the item, its
+  /// GitHub's bug report form for a Workshop item whose download failed, filled with the item, its
   /// type, the app version and the failure. Nothing is sent from here: the browser opens the draft
   /// and the person decides whether to submit it. (An installed wallpaper's report is
   /// `issueReportURL(for:failure:)`.)
@@ -57,12 +74,9 @@ extension PanelController {
       as? String
   ) -> URL? {
     let page = ExternalLink.workshopItem(id: item.id)?.absoluteString ?? item.id
-    let facts = [
-      "**Wallpaper:** \(item.title)", "**Workshop item:** \(page)", "**Type:** \(item.kind.rawValue)",
-      "**App version:** \(version ?? "unknown")", "**Error:** \(failure)",
-    ]
+    let facts = ["**Wallpaper:** \(item.title)", "**Type:** \(item.kind.rawValue)", "**Error:** \(failure)"]
     return ExternalLink.newIssue(
-      title: "[\(item.kind.rawValue)] \(item.title)",
-      body: (facts + ["", "**What went wrong?**", "", ""]).joined(separator: "\n"))
+      title: "[\(item.kind.rawValue)] \(item.title)", wallpaper: page, version: version ?? "unknown",
+      details: facts.joined(separator: "\n"))
   }
 }

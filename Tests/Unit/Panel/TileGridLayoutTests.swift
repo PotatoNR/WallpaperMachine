@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 
 @testable import WallpaperMachine
@@ -24,6 +25,20 @@ final class TileGridLayoutTests: XCTestCase {
     }
   }
 
+  func testZoomStepsChangeThePreferredWidthAndStopAtTheEnds() {
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: 0), TileGridLayout.preferredTileWidth)
+    XCTAssertLessThan(TileGridLayout.preferredWidth(zoom: -1), TileGridLayout.preferredWidth(zoom: 0))
+    XCTAssertGreaterThan(TileGridLayout.preferredWidth(zoom: 2), TileGridLayout.preferredWidth(zoom: 1))
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: -9), TileGridLayout.zoomWidths.first)
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: 9), TileGridLayout.zoomWidths.last)
+    let wide = TileGridLayout.preferredWidth(zoom: 2)
+    XCTAssertLessThan(
+      TileGridLayout.columnCount(forWidth: 1000, spacing: 14, preferredWidth: wide),
+      TileGridLayout.columnCount(forWidth: 1000, spacing: 14), "larger tiles fit fewer columns")
+    XCTAssertEqual(
+      TileGridLayout.columnCount(forWidth: 300, spacing: 14, preferredWidth: wide), 3, "never fewer than three")
+  }
+
   func testAWiderGapFitsFewerTiles() {
     XCTAssertEqual(TileGridLayout.columnCount(forWidth: 1000, spacing: 12), 6)
     XCTAssertEqual(TileGridLayout.columnCount(forWidth: 1000, spacing: 40), 5)
@@ -44,6 +59,22 @@ final class TileGridLayoutTests: XCTestCase {
     XCTAssertNil(go(2, .up), "or climb out of the first row")
     XCTAssertNil(go(7, .down), "Nothing below the short last row")
     XCTAssertNil(TileGridLayout.destination(from: 0, .last, columns: 3, count: 0))
+  }
+
+  func testReturnOrSpaceIsAClickAndCommandReturnADoubleClickWhereTheGridHasOne() {
+    func key(_ key: KeyEquivalent, _ modifiers: EventModifiers = [], canOpen: Bool = true)
+      -> TileGridLayout.Activation
+    {
+      TileGridLayout.activation(key, modifiers: modifiers, canOpen: canOpen)
+    }
+    XCTAssertEqual(key(.return), .click)
+    XCTAssertEqual(key(.space), .click)
+    XCTAssertEqual(key(.return, .command), .open)
+    XCTAssertEqual(key(.return, [.command, .shift]), .open, "other modifiers held with Command")
+    XCTAssertEqual(key(.return, .command, canOpen: false), .click, "a grid without a double click selects")
+    XCTAssertEqual(key(.space, .command), .click)
+    XCTAssertEqual(key(.return, .shift), .click)
+    XCTAssertEqual(key(.return, .option), .click)
   }
 
   func testChipsWrapOntoNewLinesAtTheWidthAndKeepTheirOrder() {

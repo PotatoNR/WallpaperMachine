@@ -102,11 +102,17 @@ final class PixivMemorySessionStore: PixivSessionStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var stored: String?
     private var refusing = false
+    private var keeping = false
     var session: String? { lock.withLock { stored } }
     /// Makes `save` fail as a keychain that refuses the item would.
     var refusesToSave: Bool {
         get { lock.withLock { refusing } }
         set { lock.withLock { refusing = newValue } }
+    }
+    /// Makes `remove` fail as a keychain that will neither delete nor empty the item would.
+    var keepsOnRemove: Bool {
+        get { lock.withLock { keeping } }
+        set { lock.withLock { keeping = newValue } }
     }
 
     init(_ session: String? = nil) { stored = session }
@@ -120,7 +126,12 @@ final class PixivMemorySessionStore: PixivSessionStoring, @unchecked Sendable {
         }
     }
 
-    func remove() { lock.withLock { stored = nil } }
+    func remove() throws {
+        try lock.withLock {
+            guard !keeping else { throw KeychainRemovalFailed(reason: "kept") }
+            stored = nil
+        }
+    }
 }
 
 /// JSON in the shapes pixiv's endpoints answer with, built from synthetic works.

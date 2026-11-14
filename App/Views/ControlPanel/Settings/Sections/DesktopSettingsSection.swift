@@ -7,6 +7,11 @@ struct DesktopSettingsSection: View {
   private static let lockScreen = SettingsItem.Group("lock-screen", title: "Lock screen")
   private static let screenSaver = SettingsItem.Group("screen-saver", title: "Screen saver")
 
+  static let desktopWallpapers = SettingsItem(
+    id: "desktop.desktop-wallpapers", section: .desktop, group: desktop,
+    title: "Different wallpaper for each desktop",
+    note: "Each desktop keeps the wallpaper you apply while you are on it, and only the desktop you are on plays, so Mission Control shows the other desktops as still pictures. A desktop you have visited waits paused where you left it; one you have not visited yet shows a still picture until its first visit. Kept wallpapers use memory and are let go when the Mac runs short of it.",
+    keywords: ["Spaces", "Choose…"])
   static let writeDesktopPicture = SettingsItem(
     id: "desktop.write-desktop-picture", section: .desktop, group: desktop,
     title: "Use the wallpaper as the macOS desktop picture",
@@ -27,11 +32,23 @@ struct DesktopSettingsSection: View {
     note:
       "Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers."
   )
+  static let hideDesktopIcons = SettingsItem(
+    id: "desktop.hide-desktop-icons", section: .desktop, group: desktop,
+    title: "Hide desktop icons",
+    note:
+      "Finder stops showing files, folders and disks on the desktop, so they no longer cover the wallpaper. They stay in your Desktop folder. Finder restarts to apply the change.",
+    keywords: ["Restart Finder"])
+  static let hideNotch = SettingsItem(
+    id: "desktop.hide-notch", section: .desktop, group: desktop,
+    title: "Hide the notch",
+    note:
+      "On displays with a camera notch, the menu bar turns black so the notch disappears into it. The rest of the screen still shows the wallpaper.",
+    keywords: ["Menu bar"])
   static let livePropertyEdits = SettingsItem(
     id: "desktop.live-property-edits", section: .desktop, group: desktop,
     title: "Show property edits on the desktop as I make them",
     note:
-      "While you edit a wallpaper’s properties, your displays follow each change before you press Apply changes, and Revert puts the saved look back. Pictures and options that switch an effect on or off still wait for Apply changes. The lock screen and the Mission Control picture keep the saved look until you apply."
+      "While you edit a wallpaper’s properties, your displays follow each change before you press Apply changes, and Revert puts the saved look back. Pictures, options that switch an effect on or off, and a video’s Wallpaper Engine options still wait for Apply changes. The lock screen and the Mission Control picture keep the saved look until you apply."
   )
 
   static let lockScreenSwitch = SettingsItem(
@@ -55,7 +72,8 @@ struct DesktopSettingsSection: View {
     title: "Compatibility & permissions")
 
   static let items = [
-    writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, livePropertyEdits,
+    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, hideDesktopIcons,
+    hideNotch, livePropertyEdits,
     lockScreenSwitch, lockScreenStatus, lockScreenContext, screenSaverSwitch, screenSaverStatus,
     screenSaverContext,
   ]
@@ -67,6 +85,7 @@ struct DesktopSettingsSection: View {
     SettingsPage(.desktop) {
       SettingsUnavailableNotice()
       SettingsGroup(Self.desktop, in: .desktop) {
+        desktopWallpapersRow
         SettingsRow(Self.writeDesktopPicture, note: desktop.lockedNote) {
           SettingsSwitchControl(key: .writeDesktopPicture)
         }
@@ -76,6 +95,8 @@ struct DesktopSettingsSection: View {
         SettingsRow(Self.keepWindowsOnClick) {
           SettingsSwitchControl(key: .keepWindowsOnWallpaperClick)
         }
+        SettingsRow(Self.hideDesktopIcons) { SettingsSwitchControl(key: .hideDesktopIcons) }
+        SettingsRow(Self.hideNotch) { SettingsSwitchControl(key: .hideNotch) }
         SettingsRow(Self.livePropertyEdits) { SettingsSwitchControl(key: .livePropertyEdits) }
       }
       SettingsGroup(Self.lockScreen, in: .desktop) {
@@ -87,7 +108,7 @@ struct DesktopSettingsSection: View {
         SettingsDisclosure(Self.lockScreenContext) {
           SettingsProse {
             Text(
-              "Lock screen animation uses private macOS APIs and may stop working after a macOS update. While it is on, the app takes over only the Desktop wallpaper selection on displays with an applied scene or video wallpaper, and reloads the macOS wallpaper service. The screen saver is a separate choice below. Turning this off restores the Desktop choices; quitting restores all choices the app changed and keeps other wallpaper changes."
+              "Lock screen animation uses private macOS APIs and may stop working after a macOS update. While it is on, the app takes over only the Desktop wallpaper selection on displays with an applied wallpaper, and reloads the macOS wallpaper service. The screen saver is a separate choice below. Turning this off restores the Desktop choices; quitting restores all choices the app changed and keeps other wallpaper changes."
             )
             Text(
               "It keeps separate copies of wallpaper files, which uses extra disk space, and may not render on every macOS version. Pause and battery settings still apply."
@@ -117,6 +138,32 @@ struct DesktopSettingsSection: View {
   }
 
   private var search: SettingsSearch { controller.settings.search }
+
+  /// Different wallpaper for each desktop, for the display the Library applies wallpapers to, named
+  /// when there are several. Choose… opens that display's card in Displays, where each desktop's
+  /// wallpaper is picked.
+  private var desktopWallpapersRow: some View {
+    let settings = controller.settings
+    let displays = controller.targetDisplays
+    let target = controller.targetDisplay
+    let several = displays.filter(\.isSelectable).count > 1
+    return SettingsRow(Self.desktopWallpapers) {
+      HStack(spacing: 8) {
+        if several, let target {
+          Text(verbatim: target.shortLabel(among: displays))
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        SettingsActionButton("Choose…", isDisabled: target?.isSelectable != true) {
+          settings.select(.displays)
+          if let target { controller.displaysSettings.revealDesktops(display: target.id) }
+        }
+        .help(L("Open \(settings.text(SettingsSection.displays.title))"))
+        SettingsSwitchControl(key: .desktopWallpapers)
+      }
+    }
+  }
 
   /// The status the service reports, with Retry beside it while it reports a failure. Retry waits
   /// for the service to finish, and for the Mac, so it is never pressed twice.

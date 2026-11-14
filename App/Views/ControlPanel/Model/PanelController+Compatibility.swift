@@ -11,14 +11,21 @@ struct CompatibilityState: Equatable {
   let isChecking: Bool
   /// The result for exactly this wallpaper and display, empty until a check ran.
   let checks: [WallpaperCompatibilityCheck]
-  /// The backend that draws the wallpaper on this display now and why it fell back, from the live
-  /// report of this wallpaper on this display's physical id. A preference is not evidence, and the
-  /// absence of a report is never read as Compatibility.
+  /// The backend that draws the wallpaper on this display now, from the live report of this wallpaper
+  /// on this display's physical id. The absence of a report is never read as a backend.
   let backend: String?
   let fallbackReason: String?
+  /// Why the wallpaper is held and not drawn when Native Metal could not draw it. Then `backend` is the
+  /// engine's "unknown": nothing is drawing it.
+  var failure: SceneFailureReport? = nil
   /// Checking is possible: the target is an enabled independent display with the wallpaper's
   /// options loaded and a frame rate to certify.
   let canCheck: Bool
+
+  /// The runtime says what draws this kind of wallpaper once it plays: a scene's renderer or a
+  /// video's player. A web page runs in the app's own web view, which reports nothing, and a
+  /// wallpaper of unknown type never plays, so the card promises no such line for either.
+  var reportsWhatDrawsIt: Bool { kind == .scene || kind == .video }
 
   /// The counts the card summarizes in words, in the order it names them.
   var unavailableCount: Int { checks.filter { $0.status == .unavailable }.count }
@@ -54,6 +61,7 @@ extension PanelController {
     let physicalID = ResolvedDisplayTitles.liveDisplayID(
       context.displayID, title: display?.title ?? "")
     var report: (backend: String, reason: String?)?
+    var failure: SceneFailureReport?
     if let video = settings.videoBackends.first(where: {
       $0.wallpaperId == context.wallpaperID && $0.displayId == physicalID
     }) {
@@ -61,12 +69,16 @@ extension PanelController {
     } else if let scene = settings.sceneRenderers.first(where: {
       $0.wallpaperId == context.wallpaperID && $0.displayId == physicalID
     }) {
-      report = (scene.backend, scene.fallbackReason)
+      report = (scene.backend, nil)
+      failure = scene.failureStage.map {
+        SceneFailureReport(stage: SceneFailureStage(name: $0), reason: scene.failureReason)
+      }
     }
     return CompatibilityState(
       wallpaperID: context.wallpaperID, displayID: context.displayID, kind: context.kind,
       isChecking: current && compatibility.checking, checks: current ? compatibility.checks : [],
-      backend: report?.backend, fallbackReason: report?.reason, canCheck: context.targetAvailable)
+      backend: report?.backend, fallbackReason: report?.reason, failure: failure,
+      canCheck: context.targetAvailable)
   }
 
   /// `compatibilityCheck`: reads the wallpaper's files again and re-runs the checks. Leaves the banner
@@ -101,7 +113,7 @@ extension PanelController {
     let settings = store.settingsSnapshot
     let displayID = navigation.targetDisplayID
     let display = settings.displays.first { $0.displayId == displayID }
-    let available = display?.enabled == true && display?.mode == .standalone
+    let available = display?.isIndependent == true
     let options = store.wallpaperOptionsSnapshot.flatMap { $0.wallpaperId == id ? $0 : nil }
     let configuration = options?.displayConfigurations.first { $0.displayId == displayID }
     var fps = min(configuration?.targetFps ?? display?.targetFps ?? 0, display?.maxFps ?? 0)
@@ -121,11 +133,10 @@ extension PanelController {
     // on the service actor, not through ClientPaths.assetsURL here.
     let assetsConfiguration =
       ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_ASSETS_ROOT"]
-      ?? ClientPreferences.defaults.string(forKey: "WallpaperMachineAssetsPath") ?? ""
+      ?? ClientPreferences.defaults.string(forKey: ClientPaths.assetsPathKey) ?? ""
     return WallpaperCompatibilityContext(
       wallpaperID: id, displayID: displayID, kind: kind, supported: entry.supported,
       targetFPS: fps, targetAvailable: available && options != nil && fps > 0,
-      videoBackend: settings.videoBackend, sceneRenderer: settings.sceneRenderer,
       libraryRevision: store.libraryRefreshRevision, assetsConfiguration: assetsConfiguration)
   }
 }

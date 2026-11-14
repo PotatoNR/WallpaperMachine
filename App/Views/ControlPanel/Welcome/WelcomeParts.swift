@@ -163,37 +163,26 @@ struct WelcomeNotice: View {
   }
 }
 
-/// How the guide speaks to VoiceOver about something that changed where the person is not looking.
-enum WelcomeAnnouncer {
-  /// Queued after whatever VoiceOver is reading, never interrupting it: a status, not an alarm.
-  @MainActor
-  static func polite(_ message: String) {
-    var announcement = AttributedString(message)
-    announcement.accessibilitySpeechAnnouncementPriority = .default
-    AccessibilityNotification.Announcement(announcement).post()
-  }
-}
-
 // MARK: - Status cards
 
-/// An icon, a title, a sentence and whatever else belongs to a state of the Steam page. While
-/// something is working the icon is a spinner (which only moves while the window is on screen),
-/// which VoiceOver reads as a progress indicator named for what is working.
+/// An icon, a title, a sentence and whatever else belongs with them: the Tips page's word about
+/// wallpapers that do not run yet.
 struct WelcomeStatusCard<Content: View>: View {
   var systemImage: String
   var title: Text
   var detail: Text?
-  var isSuccess = false
-  /// A ring in place of the icon: `nil` spins, a fraction fills.
-  var working: WelcomeWorking?
   @ViewBuilder var content: Content
 
   @Environment(\.panelTheme) private var theme
 
   var body: some View {
     HStack(alignment: .top, spacing: 14) {
-      leading
+      Image(systemName: systemImage)
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(theme.accent.accent.color)
         .frame(width: 32, height: 32)
+        .background(theme.accent.accent.color.opacity(0.12), in: Circle())
+        .accessibilityHidden(true)
       WelcomeColumn(spacing: 8) {
         title
           .font(.system(size: 14, weight: .semibold))
@@ -214,53 +203,13 @@ struct WelcomeStatusCard<Content: View>: View {
     .padding(16)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background {
-      RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .fill(isSuccess ? theme.accent.primary.color.opacity(0.10) : theme.surface.well.color)
+      RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.surface.well.color)
     }
     .overlay {
       RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .strokeBorder(
-          isSuccess ? theme.accent.primaryLine.color.opacity(0.4) : theme.surface.divider.color,
-          lineWidth: 0.5)
+        .strokeBorder(theme.surface.divider.color, lineWidth: 0.5)
     }
     .accessibilityElement(children: .contain)
-  }
-
-  @ViewBuilder private var leading: some View {
-    if let working {
-      ProgressRing(value: working.fraction, lineWidth: 2.5)
-        .padding(6)
-        // The ring is drawn by hand and is decoration on its own; VoiceOver gets the system's
-        // progress indicator in its place, with the label and how far along it is.
-        .accessibilityRepresentation {
-          if let fraction = working.fraction {
-            ProgressView(value: fraction) { Text(verbatim: working.label) }
-          } else {
-            ProgressView { Text(verbatim: working.label) }
-          }
-        }
-    } else {
-      Image(systemName: systemImage)
-        .font(.system(size: 15, weight: .semibold))
-        .foregroundStyle(isSuccess ? theme.accent.onPrimary.color : theme.accent.accent.color)
-        .frame(width: 32, height: 32)
-        .background(
-          isSuccess ? theme.accent.primary.color : theme.accent.accent.color.opacity(0.12),
-          in: Circle())
-        .accessibilityHidden(true)
-    }
-  }
-}
-
-/// Whether a status card is working, and how far along.
-struct WelcomeWorking: Equatable {
-  /// `nil` when how much is done is not known.
-  var fraction: Double?
-  /// The name VoiceOver gives the card's progress indicator.
-  var label: String
-
-  static func indeterminate(_ label: String) -> WelcomeWorking {
-    WelcomeWorking(fraction: nil, label: label)
   }
 }
 
@@ -295,26 +244,18 @@ struct WelcomeLinkButton: View {
 
 // MARK: - Buttons
 
-/// The pill that moves the guide forward: **Continue**, **Start using the app**, **Sign in**. The
-/// compact size is the button inside a card: Allow, Install, Buy, Submit.
+/// The pill that moves the guide forward: **Continue**, **Start using the app**.
 ///
 /// The guide's buttons take their height from padding and never from a `minHeight` frame, which
 /// would make them flexible in height and the stack around them squeeze the text beside them.
 struct WelcomePrimaryButtonStyle: ButtonStyle {
-  enum Size {
-    case regular, compact
-  }
-
-  var size = Size.regular
-
   func makeBody(configuration: Configuration) -> some View {
-    WelcomePrimaryBody(configuration: configuration, size: size)
+    WelcomePrimaryBody(configuration: configuration)
   }
 }
 
 private struct WelcomePrimaryBody: View {
   let configuration: ButtonStyleConfiguration
-  let size: WelcomePrimaryButtonStyle.Size
   @Environment(\.panelTheme) private var theme
   @Environment(\.isEnabled) private var isEnabled
   @State private var isHovering = false
@@ -322,13 +263,13 @@ private struct WelcomePrimaryBody: View {
   var body: some View {
     let accent = theme.accent
     configuration.label
-      .font(.system(size: size == .regular ? 13.5 : 12.5, weight: .semibold))
+      .font(.system(size: 13.5, weight: .semibold))
       .foregroundStyle(accent.onPrimary.color)
       .lineLimit(1)
-      .padding(.horizontal, size == .regular ? 18 : 12)
-      .padding(.vertical, size == .regular ? 9 : 5)
+      .padding(.horizontal, 18)
+      .padding(.vertical, 9)
       .background(fill.color, in: Capsule())
-      .opacity(isEnabled ? 1 : 0.4)
+      .panelDisabledOpacity(isEnabled)
       .contentShape(Capsule())
       .onHover { isHovering = $0 }
   }
@@ -340,7 +281,7 @@ private struct WelcomePrimaryBody: View {
   }
 }
 
-/// A text button for what is optional: **Back**, **Skip**.
+/// A text button for what is optional: **Back**, **Skip**, **Skip setup**.
 struct WelcomeQuietButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     WelcomeQuietBody(configuration: configuration)
@@ -361,7 +302,7 @@ private struct WelcomeQuietBody: View {
       .padding(.horizontal, 12)
       .padding(.vertical, 6)
       .background(background, in: Capsule())
-      .opacity(isEnabled ? 1 : 0.4)
+      .panelDisabledOpacity(isEnabled)
       .contentShape(Capsule())
       .onHover { isHovering = $0 }
   }
@@ -372,7 +313,7 @@ private struct WelcomeQuietBody: View {
   }
 }
 
-/// A quiet filled capsule for a secondary action inside a card: Cancel, Check again, Review.
+/// A quiet filled capsule for a secondary action inside a card: the Start page's Review.
 /// `isActive` tints it with the accent, for the one that asks for the person's attention.
 struct WelcomeCapsuleButtonStyle: ButtonStyle {
   var isActive = false
@@ -397,7 +338,7 @@ private struct WelcomeCapsuleBody: View {
       .padding(.horizontal, 11)
       .padding(.vertical, 5)
       .background(background, in: Capsule())
-      .opacity(isEnabled ? 1 : 0.4)
+      .panelDisabledOpacity(isEnabled)
       .contentShape(Capsule())
       .onHover { isHovering = $0 }
   }
@@ -411,9 +352,6 @@ private struct WelcomeCapsuleBody: View {
 
 extension ButtonStyle where Self == WelcomePrimaryButtonStyle {
   static var welcomePrimary: WelcomePrimaryButtonStyle { WelcomePrimaryButtonStyle() }
-  static func welcomePrimary(size: WelcomePrimaryButtonStyle.Size) -> WelcomePrimaryButtonStyle {
-    WelcomePrimaryButtonStyle(size: size)
-  }
 }
 
 extension ButtonStyle where Self == WelcomeQuietButtonStyle {
@@ -534,7 +472,7 @@ private struct WelcomeTileBody: View {
             .padding(-3)
         }
       }
-      .opacity(isEnabled ? 1 : 0.55)
+      .panelDisabledOpacity(isEnabled)
       .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
       .onHover { isHovering = $0 }
       .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isSelected)

@@ -63,7 +63,7 @@ private struct WelcomeActionRowStyle: ButtonStyle {
               isSuggested ? theme.accent.primaryLine.color : theme.surface.divider.color,
               lineWidth: isSuggested ? 1.5 : 0.5)
         }
-        .opacity(isEnabled ? 1 : 0.55)
+        .panelDisabledOpacity(isEnabled)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onHover { isHovering = $0 }
     }

@@ -54,7 +54,7 @@ final class EnergyReadoutTests: PanelTestCase {
     XCTAssertNil(video.levelTitle)
     XCTAssertNil(video.batteryPercentPerHour)
     XCTAssertEqual(video.caveats, [.nativeVideo])
-    XCTAssertEqual(EnergyReadout.Caveat.nativeVideo.title, "Native video not counted")
+    XCTAssertEqual(EnergyReadout.Caveat.nativeVideo.title, "Video not counted")
 
     let shared = readout(ready(cpu: 800, gpu: 200, contended: true))
     XCTAssertNil(shared.level)
@@ -86,6 +86,24 @@ final class EnergyReadoutTests: PanelTestCase {
     XCTAssertEqual(
       EnergyReadout.milliwatts(1250, locale: Locale(identifier: "de_DE")), "1,3 W",
       "The Mac's region decides the decimal mark")
+  }
+
+  func testTheMenuBarShowsTheTotalAndOnlyAMacThatCannotMeasureShowsNothing() throws {
+    try pinPanelLanguageToEnglish()
+    XCTAssertEqual(readout(ready(cpu: 400, gpu: 800)).menuBarTitle(locale: en), "1.2 W")
+    XCTAssertEqual(readout(ready(cpu: 300, gpu: 200)).menuBarTitle(locale: en), "500 mW")
+    XCTAssertEqual(
+      readout(ready(cpu: 400, gpu: 800, nativeVideo: true)).menuBarTitle(locale: en), "1.2 W",
+      "A caveat dims the figure; the tooltip says why")
+    XCTAssertEqual(readout(.measuring).menuBarTitle(locale: en), "…", "The first reading is on its way")
+    XCTAssertNil(readout(.unavailable).menuBarTitle(locale: en), "The icon stays alone")
+
+    let graded = readout(ready(cpu: 400, gpu: 800), battery: 50).summary
+    for word in ["Medium energy use", "CPU 400 mW", "GPU 800 mW", "of a full battery charge per hour"] {
+      XCTAssertTrue(graded.contains(word), "\(word) is missing from the tooltip: \(graded)")
+    }
+    let video = readout(ready(cpu: 400, gpu: 800, nativeVideo: true)).summary
+    XCTAssertTrue(video.hasPrefix("Video not counted"), "The tooltip names the caveat first: \(video)")
   }
 
   func testTheComparisonSaysWhatTheChangeDid() throws {

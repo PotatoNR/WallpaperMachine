@@ -40,12 +40,9 @@ private struct PixivInspectorDetail: View {
         }
         if !work.tags.isEmpty { tags }
         links
-        Text(
+        InspectorNote(
           "Saved to your library as a still wallpaper that applies like any other. The artwork belongs to its artist."
         )
-        .font(.caption)
-        .foregroundStyle(theme.surface.muted.color)
-        .textSelection(.enabled)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(16)
@@ -75,7 +72,7 @@ private struct PixivInspectorDetail: View {
   private var heading: some View {
     VStack(alignment: .leading, spacing: 4) {
       Text(verbatim: work.displayTitle)
-        .font(.system(size: 17, weight: .bold))
+        .font(.panel(.title))
         .foregroundStyle(theme.surface.text.color)
         .textSelection(.enabled)
         .accessibilityAddTraits(.isHeader)
@@ -86,11 +83,12 @@ private struct PixivInspectorDetail: View {
           } label: {
             Text(verbatim: work.authorName)
           }
-          .buttonStyle(.link)
+          .buttonStyle(.panelLink)
+          .font(.panel(.body))
           .help(L("View on pixiv"))
         } else {
           Text(verbatim: work.authorName)
-            .font(.system(size: 13))
+            .font(.panel(.body))
             .foregroundStyle(theme.surface.muted.color)
             .textSelection(.enabled)
         }
@@ -98,7 +96,7 @@ private struct PixivInspectorDetail: View {
       let meta = PixivMeta.parts(selection)
       if !meta.isEmpty {
         Text(verbatim: meta.joined(separator: " · "))
-          .font(.system(size: 12))
+          .font(.panel(.callout))
           .foregroundStyle(theme.surface.muted.color)
           .textSelection(.enabled)
       }
@@ -118,7 +116,7 @@ private struct PixivInspectorDetail: View {
         if isMultiPage {
           PixivPageStepper(selection: selection)
           if selection.pages == .loading {
-            Text("Loading pages…").font(.caption).foregroundStyle(theme.surface.muted.color)
+            Text("Loading pages…").font(.panel(.caption)).foregroundStyle(theme.surface.muted.color)
           }
         }
         if let failure = pagesFailure {
@@ -126,8 +124,8 @@ private struct PixivInspectorDetail: View {
             Button("Try again") {
               controller.launch("pixivRetryPages") { try await controller.pixivRetryPages() }
             }
-            .buttonStyle(.link)
-            .controlSize(.small)
+            .buttonStyle(.panelLink)
+            .font(.panel(.callout))
             .accessibilityIdentifier("pixiv-retry-pages")
           }
         }
@@ -163,27 +161,12 @@ private struct PixivInspectorDetail: View {
     }
   }
 
+  /// The same button the Installed and Steam Workshop inspectors lead with.
   private var applyButton: some View {
-    let offer = PixivApplyOffer(libraryID: selection.libraryID, target: controller.mediaApplyTarget)
-    let key = PanelActionCoordinator.key("activate", id: offer.libraryID)
-    return Button {
-      controller.launch(key) {
-        if offer.reapplies {
-          try await controller.reapply(offer.libraryID)
-        } else {
-          try await controller.activate(offer.libraryID)
-        }
-      }
-    } label: {
-      if offer.reapplies {
-        Label("Reapply wallpaper", systemImage: "play.fill")
-      } else {
-        Label("Apply wallpaper", systemImage: "play.fill")
-      }
-    }
-    .buttonStyle(.panelPrimary(size: .regular, expands: true))
-    .disabled(!offer.isEnabled || controller.isBusy(key))
-    .accessibilityIdentifier("pixiv-apply")
+    let offer = ApplyOffer(
+      wallpaperID: selection.libraryID, target: controller.mediaApplyTarget,
+      targetName: controller.applyTargetName, isBusy: { controller.isBusy($0) })
+    return InspectorApplyButton(offer: offer, identifier: "pixiv-apply")
   }
 
   private func downloadButton(_ label: PixivSelection.Download.Label) -> some View {
@@ -206,24 +189,19 @@ private struct PixivInspectorDetail: View {
 
   private func pauseButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivPause", id: job.id)) {
-        try await controller.pixivPause(id: job.id)
-      }
+      controller.downloads.pause(DownloadRow(job))
     } label: {
-      Label("Pause download", systemImage: "pause.fill").frame(maxWidth: .infinity)
+      Label("Pause download", systemImage: DownloadRowAction.pause.systemImage)
     }
-    .buttonStyle(.bordered)
-    .controlSize(.large)
+    .buttonStyle(.panelSecondary(size: .regular, expands: true))
     .accessibilityIdentifier("pixiv-pause")
   }
 
   private func resumeButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivResume", id: job.id)) {
-        try await controller.pixivResume(id: job.id)
-      }
+      controller.downloads.resume(DownloadRow(job))
     } label: {
-      Label("Resume download", systemImage: "play.fill")
+      Label("Resume download", systemImage: DownloadRowAction.resume.systemImage)
     }
     .buttonStyle(.panelPrimary(size: .regular, expands: true))
     .accessibilityIdentifier("pixiv-resume")
@@ -231,14 +209,11 @@ private struct PixivInspectorDetail: View {
 
   private func cancelButton(_ job: PixivDownloadRow) -> some View {
     Button {
-      controller.launch(PanelActionCoordinator.key("pixivCancel", id: job.id)) {
-        try await controller.pixivCancel(id: job.id)
-      }
+      controller.downloads.cancel(DownloadRow(job))
     } label: {
-      Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+      Image(systemName: DownloadRowAction.cancel.systemImage)
     }
-    .buttonStyle(.bordered)
-    .controlSize(.large)
+    .buttonStyle(.panelSecondary(size: .regular))
     .help(L("Cancel"))
     .accessibilityLabel(L("Cancel"))
     .accessibilityIdentifier("pixiv-cancel")
@@ -250,17 +225,11 @@ private struct PixivInspectorDetail: View {
   private var progress: some View {
     if case .pending(let job) = selection.download {
       VStack(alignment: .leading, spacing: 6) {
-        if let fraction = job.progress {
-          ProgressView(value: fraction)
-        } else {
-          ProgressView()
-        }
+        ProgressBar(value: job.progress)
         Text(verbatim: job.inspectorStatus())
-          .font(.caption)
+          .font(.panel(.footnote).monospacedDigit())
           .foregroundStyle(theme.surface.muted.color)
-          .monospacedDigit()
       }
-      .progressViewStyle(.linear)
       .accessibilityElement(children: .combine)
       .accessibilityLabel(Text("\(job.work.displayTitle) download progress"))
       .accessibilityValue(Text(verbatim: job.inspectorStatus()))
@@ -286,10 +255,10 @@ private struct PixivInspectorDetail: View {
             try await controller.showInstalled(id)
           }
         } label: {
-          Label("Show in library", systemImage: "photo.on.rectangle")
+          Label("Show in library", systemImage: "photo")
         }
-        .buttonStyle(.link)
-        .labelStyle(PixivLinkLabelStyle())
+        .buttonStyle(.panelLink)
+        .labelStyle(.panelLinkRow)
         .accessibilityIdentifier("pixiv-show-in-library")
       }
       if let url = ExternalLink.pixivArtwork(id: work.id) {
@@ -298,22 +267,13 @@ private struct PixivInspectorDetail: View {
         } label: {
           Label("View on pixiv", systemImage: "arrow.up.right.square")
         }
-        .buttonStyle(.link)
-        .labelStyle(PixivLinkLabelStyle())
+        .buttonStyle(.panelLink)
+        .labelStyle(.panelLinkRow)
         .accessibilityIdentifier("pixiv-view-on-pixiv")
       }
     }
-  }
-}
-
-/// A glyph and a title for a link-style button, with the glyphs in a column of one width so the
-/// titles of stacked links line up.
-private struct PixivLinkLabelStyle: LabelStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    HStack(spacing: 6) {
-      configuration.icon.frame(width: 16)
-      configuration.title
-    }
+    // The Steam Workshop inspector's links set the same type.
+    .font(.panel(.callout))
   }
 }
 
@@ -347,7 +307,7 @@ private struct PixivNotice<Trailing: View>: View {
         .accessibilityHidden(true)
       VStack(alignment: .leading, spacing: 6) {
         Text(verbatim: message)
-          .font(.system(size: 12))
+          .font(.panel(.callout))
           .foregroundStyle(theme.surface.text.color)
           .textSelection(.enabled)
         trailing
@@ -366,7 +326,7 @@ extension PixivNotice where Trailing == EmptyView {
   }
 }
 
-/// Previous page, "Page 2 of 3" with a check when that page is saved, and next page.
+/// Previous page, "Page 2 of 3" with the library mark when that page is saved, and next page.
 private struct PixivPageStepper: View {
   let selection: PixivSelection
 
@@ -381,13 +341,14 @@ private struct PixivPageStepper: View {
       Spacer(minLength: 4)
       HStack(spacing: 5) {
         Text("Page \(index + 1) of \(count)")
-          .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+          .font(.panel(.label).monospacedDigit())
           .foregroundStyle(theme.surface.text.color)
         if selection.isSaved {
-          Image(systemName: "checkmark.circle.fill")
+          // The grid's mark for a page in the library, not a tick or the green of approval.
+          Image(systemName: TileMark.inLibrary.systemImage)
             .font(.system(size: 12))
-            .foregroundStyle(theme.surface.approved.color)
-            .help(L("In your library"))
+            .foregroundStyle(theme.surface.muted.color)
+            .help(TileMark.inLibrary.label)
         }
       }
       .accessibilityElement(children: .ignore)
@@ -398,13 +359,7 @@ private struct PixivPageStepper: View {
     }
     .padding(.horizontal, 4)
     .frame(height: 32)
-    .background(
-      theme.surface.card.color, in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-    )
-    .overlay {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .strokeBorder(theme.surface.divider.color, lineWidth: 0.5)
-    }
+    .panelCardSurface()
     .accessibilityElement(children: .contain)
     .accessibilityLabel(L("Pages of this work"))
   }

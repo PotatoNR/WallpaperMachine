@@ -1,11 +1,12 @@
 import SwiftUI
 
 /// The ring a pixiv tile wears over its picture while a page of the work is on its way: progress
-/// while it transfers, a click to cancel, a play mark when it is paused, a retry mark after a
+/// while it transfers, a click to cancel, a resume mark when it is paused, a retry mark after a
 /// failure. The state and the words come from `TileDownloadState`; this only draws them.
 ///
-/// The disc is dark whatever the appearance, since it sits over artwork. Only a ring that has no
-/// measured progress moves, and only while the panel is on screen (`ProgressRing`).
+/// The disc is the Steam Workshop ring's (`ArtworkDisc`), dark whatever the appearance, since it
+/// sits over artwork. Only a ring that has no measured progress moves, and only while the panel is
+/// on screen (`ProgressRing`).
 struct PixivTileRing: View {
   let state: TileDownloadState
   let action: () -> Void
@@ -19,7 +20,7 @@ struct PixivTileRing: View {
   var body: some View {
     Button(action: action) {
       ZStack {
-        Circle().fill(.black.opacity(isHovering ? 0.72 : 0.58))
+        ArtworkDisc(isHighlighted: isHovering && state.isEnabled)
         ProgressRing(value: arc, lineWidth: 3)
           .padding(3)
           .tint(tint)
@@ -52,32 +53,30 @@ struct PixivTileRing: View {
     state.kind == .failed ? theme.surface.danger.color : theme.accent.base.color
   }
 
-  private var showsClose: Bool { state.showsCloseOnHover && (isHovering || isFocused) }
+  private var showsClose: Bool { state.showsClose(isHovering: isHovering, isFocused: isFocused) }
+
+  /// The centre's glyph: white, and dimmer while the page waits or is paused, as the Steam
+  /// Workshop ring dims its track.
+  private func glyphColor(dimmed: Bool) -> Color {
+    theme.surface.markGlyph.color.opacity(dimmed ? 0.78 : 1)
+  }
 
   @ViewBuilder
   private var center: some View {
     if showsClose {
-      Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+      Image(systemName: DownloadRowAction.cancel.systemImage)
+        .font(.system(size: 13, weight: .bold)).foregroundStyle(theme.surface.markGlyph.color)
     } else if let glyph = state.glyph {
-      Image(systemName: Self.symbol(for: glyph))
+      Image(systemName: glyph.systemImage)
         .font(.system(size: 14, weight: .semibold))
-        .foregroundStyle(state.kind == .queued ? .white.opacity(0.78) : .white)
+        .foregroundStyle(glyphColor(dimmed: state.kind == .queued))
     } else if !state.text.isEmpty {
       Text(verbatim: state.text)
         .font(.system(size: state.isStepWord ? 9 : 11.5, weight: .semibold).monospacedDigit())
-        .foregroundStyle(.white)
+        .foregroundStyle(theme.surface.markGlyph.color)
         .lineLimit(1)
         .minimumScaleFactor(0.6)
         .padding(.horizontal, 6)
-    }
-  }
-
-  static func symbol(for glyph: TileDownloadState.Glyph) -> String {
-    switch glyph {
-    case .play: "play.fill"
-    case .shield: "exclamationmark.shield.fill"
-    case .download: "arrow.down"
-    case .refresh: "arrow.clockwise"
     }
   }
 }

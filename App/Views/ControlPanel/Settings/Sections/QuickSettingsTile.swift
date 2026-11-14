@@ -40,7 +40,8 @@ struct QuickTile: Identifiable, Equatable {
         isExperimental: false),
       QuickTile(
         key: .wallpapersMuted, symbol: muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-        isOn: muted, isEnabled: true, note: nil, isExperimental: false),
+        isOn: muted, isEnabled: true, note: muteAllNote(for: controller, isOn: muted),
+        isExperimental: false),
       QuickTile(
         key: .lockScreenEnabled, symbol: "lock.fill", isOn: isOn(.lockScreenEnabled),
         isEnabled: controller.isSwitchEnabled(.lockScreenEnabled), note: lock.tileNote,
@@ -52,6 +53,7 @@ struct QuickTile: Identifiable, Equatable {
       QuickTile(
         key: .writeDesktopPicture, symbol: "desktopcomputer", isOn: isOn(.writeDesktopPicture),
         isEnabled: controller.isSwitchEnabled(.writeDesktopPicture), note: nil, isExperimental: false),
+      desktopWallpapersTile(for: controller, isOn: isOn(.desktopWallpapers)),
     ]
     if controller.playbackSettings.showsActiveDisplayOnly {
       tiles.append(
@@ -68,6 +70,32 @@ struct QuickTile: Identifiable, Equatable {
         isEnabled: true, note: nil, isExperimental: false),
     ]
     return tiles
+  }
+
+  /// Wallpaper per Desktop, for the display the Library applies wallpapers to. With several displays
+  /// its state line names that display; one that cannot have it says Unavailable.
+  @MainActor
+  private static func desktopWallpapersTile(for controller: PanelController, isOn: Bool) -> QuickTile {
+    let enabled = controller.isSwitchEnabled(.desktopWallpapers)
+    let displays = controller.targetDisplays
+    var note: String?
+    if !enabled {
+      note = L("Unavailable")
+    } else if displays.filter(\.isSelectable).count > 1, let target = controller.targetDisplay {
+      note = "\(isOn ? L("On") : L("Off")) · \(target.shortLabel(among: displays))"
+    }
+    return QuickTile(
+      key: .desktopWallpapers, symbol: "rectangle.3.group", isOn: isOn, isEnabled: enabled, note: note,
+      isExperimental: false)
+  }
+
+  /// Mute All, while off, names the wallpapers muted on their own in the inspector, so a wallpaper
+  /// that stays silent with Mute All off is not a surprise. On, every wallpaper is silent anyway.
+  @MainActor
+  private static func muteAllNote(for controller: PanelController, isOn: Bool) -> String? {
+    let count = controller.playbackSettings.mutedWallpaperCount
+    guard !isOn, count > 0 else { return nil }
+    return "\(L("Off")) · \(L("\(count) muted separately"))"
   }
 
   /// The state itself: the note when there is one, else On or Off.
@@ -102,10 +130,14 @@ struct QuickTileView: View {
             Circle().fill(tile.isOn ? theme.accent.primary.color : theme.surface.badge.color)
           )
         VStack(alignment: .leading, spacing: 1) {
+          // A long name ("Wallpaper per Desktop" on the narrowest tile) shrinks a little before
+          // it truncates.
           Text(verbatim: title)
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(theme.surface.text.color)
             .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(0.8)
           // The whole line when it fits; the state alone when the tile is too narrow for the badge.
           ViewThatFits(in: .horizontal) {
             stateText(tile.stateLine)
@@ -128,7 +160,7 @@ struct QuickTileView: View {
     }
     .buttonStyle(QuickTilePressStyle(reduceMotion: reduceMotion))
     .disabled(!tile.isEnabled || isLocked)
-    .opacity(tile.isEnabled ? 1 : 0.5)
+    .panelDisabledOpacity(tile.isEnabled)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(Text(verbatim: title))
     .accessibilityValue(Text(verbatim: tile.stateLine))

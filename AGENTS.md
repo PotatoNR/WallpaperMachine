@@ -8,13 +8,17 @@ sandboxed ExtensionKit lock screen. `CLAUDE.md` must stay a relative symlink to 
 Read only task-relevant sections; keep this file to durable rules and routing.
 For any doc over ~300 lines, list its headings with `rg -n '^#' <file>` and read
 with offset/limit; never read the whole file. `.ignore` keeps `rg` out of
-`docs/archive/`, `docs/testing/archive/`, `App/Bridge/Generated/` and `upstream/`;
+`docs/archive/`, `docs/testing/archive/`, `App/Bridge/Generated/` and `ThirdParty/`;
 use `rg -u` only when those are the target.
 
 - Placement / runtime: [layout](docs/repository-layout.md), [architecture](docs/architecture.md).
 - Code / tests / docs: [conventions](docs/conventions.md), [testing](docs/testing/README.md).
 - Build / package / versions: [build](docs/build.md), [release](docs/release.md).
 - Product / features: [README](README.md), [docs index](docs/README.md).
+- A wallpaper that looks wrong (issue reports): [wallpaper fixes](docs/testing/wallpaper-fixes.md),
+  skill `wallpaper-issue`.
+- An emergency/urgent/hotfix patch release: [hotfix releases](docs/release.md#hotfix-releases),
+  skill `hotfix-release`; the request authorizes the `release:` line, not the push.
 
 ## Ownership and invariants
 
@@ -22,8 +26,9 @@ use `rg -u` only when those are the target.
   renderer facade and editor drafts; `App/Views/ControlPanel/`: the SwiftUI panel.
 - Panel: `Model/` holds `PanelController` and its typed `async throws` actions (views
   call them through `launch`, never by string), `Shell/`, `Library/`, `Inspector/`,
-  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` the area views and their
-  view models, `Components/`, `Theme/`, `Localization/`, `Images/` the shared pieces.
+  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/`, `MenuBar/` (the menu bar
+  panel) the area views and their view models, `Components/`, `Theme/`, `Localization/`,
+  `Images/` the shared pieces.
   Untrusted text is `Text(verbatim:)`, links go through `ExternalLink`; views do no
   network, disk, per-frame or idle work ([conventions](docs/conventions.md#swiftui-control-panel)).
 - `Extension/`: sandboxed extension; `Shared/`: only code compiled by both targets,
@@ -38,8 +43,10 @@ use `rg -u` only when those are the target.
   the next version ([recovery](docs/release.md#recovering-a-failed-release)).
   Regenerate `App/Bridge/Generated/` via `scripts/build.py` after bridge changes;
   never patch generated bindings.
-- `upstream/` is vendored renderer code, not app code. Every change requires updating
-  `upstream/provenance.json`; preserve notices and [licensing constraints](LICENSING.md).
+- `Renderer/` is the project's renderer: the Rust workspace (`Shader/`, `Core/`, `Bridge/`)
+  and the C++ scene engine (`Engine/`) with its libraries. `ThirdParty/` is vendored
+  third-party code only; every change there requires updating `ThirdParty/provenance.json`;
+  preserve notices and [licensing constraints](LICENSING.md).
 - Wallpaper/renderer fixes repair the general mechanism (format, shader, scene,
   script, playback): never detect or special-case a wallpaper by workshop ID,
   title, path, hash or a fingerprint of its quirks. Reproduce the failure as a
@@ -50,10 +57,11 @@ use `rg -u` only when those are the target.
   without the Windows VM, say the fix was not compared. No frame-time, memory or
   energy cost to paper over a bug (extra passes, per-frame CPU work, unbounded
   caches); if a real trade-off is unavoidable, stop and ask.
-- Every new user-facing string goes into every shipped catalog in the same change
-  (`App/Resources/*.xcstrings`, `Extension/Localizable.xcstrings`); a panel literal
+- Every new user-facing string goes, in the same change, into the catalog of each target
+  that shows it, in every language that catalog ships (`App/Resources/*.xcstrings` for the
+  app, `Extension/Localizable.xcstrings` only for what the lock-screen extension shows); a panel literal
   (`Text("…")`, `L("…")`) must equal its catalog key or it renders English.
-  `README.md` and `README.zh-CN.md` change together ([localization](docs/localization.md)).
+  `README.md`, `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md` change together ([localization](docs/localization.md)).
 - Match surrounding conventions; reuse `ClientPaths`, `AppLog` and dependency injection.
   Unit tests run inside the real app, so `UserDefaults.standard` is the installed app's
   preferences: isolate with `WALLPAPER_MACHINE_HOME` and `TemporaryDefaults`, never a
@@ -81,8 +89,9 @@ use `rg -u` only when those are the target.
   `.omo/`, `.omp/`, `.pi/`) and `CLAUDE.local.md` are Git-ignored, machine-local state
   and personal rules: never `git add -f` them or link them from tracked docs. Ignore a
   new agent tool's dir in the same change; a shared file inside one follows the
-  `.gitignore` recipe and is listed here (none today). Check `git status` for agent
-  paths before every commit.
+  `.gitignore` recipe and is listed here: the `wallpaper-issue` and `hotfix-release` skills
+  (`.agents/skills/<name>/`, linked from `.claude/skills/`). Check `git status`
+  for agent paths before every commit.
 
 ## Permissions
 
@@ -91,8 +100,10 @@ use `rg -u` only when those are the target.
 - No desktop control, opening windows, screenshots, wallpaper/appearance changes, audio
   hardware, permission prompts, live Steam login or app install/restart without explicit
   authorization. Feature/test approval is not desktop approval, with one exception: a
-  wallpaper fix may wake the Parallels Windows VM, run the reference capture in it
-  (Wallpaper Engine muted) and suspend it again. Peekaboo and
+  wallpaper fix may download the reported Workshop item with
+  `scripts/we_reference.py fetch` (the app's saved Steam sign-in, never a new one), wake
+  the Parallels Windows VM, run the reference capture in it (Wallpaper Engine muted)
+  and suspend it again. Peekaboo and
   `python3 scripts/test.py --ui` require a requested desktop run, never a completion/release
   gate. [Tool guidance](docs/development-tools.md) includes `python3 scripts/check_dev_tools.py`
   (safe inspection; installation ≠ permission).

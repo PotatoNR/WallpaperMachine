@@ -121,14 +121,31 @@ final class DisplaysSettingsModel {
   var layoutName = DisplaysNameForm()
   /// The layout whose Delete… was pressed and is waiting for its confirmation.
   var layoutDeleteArmed: String?
-  /// "Display layout saved.", "Wallpaper arrangement applied.": the result of the last layout, copy
-  /// or swap action, kept until the next one.
-  private(set) var layoutStatus: String?
-  /// Why the last layout, copy or swap action failed.
-  private(set) var layoutError: String?
-  /// The display whose Copy or swap gave `layoutStatus` or `layoutError`; nil when a layout action
-  /// did. Only that display's Copy or swap disclosure repeats the result.
-  private(set) var transferSource: String?
+  /// The result of the last layout, copy or swap action, kept until the next one.
+  struct LayoutOutcome: Equatable {
+    enum Kind: Equatable {
+      /// "Display layout saved.", "Wallpaper arrangement applied.".
+      case status(String)
+      /// Why the action failed.
+      case failure(String)
+    }
+
+    let kind: Kind
+    /// The display whose Copy or swap gave the result; nil when a layout action did. Only that
+    /// display's Copy or swap disclosure repeats the result.
+    let source: String?
+
+    var status: String? {
+      if case .status(let text) = kind { text } else { nil }
+    }
+
+    var failure: String? {
+      if case .failure(let text) = kind { text } else { nil }
+    }
+  }
+
+  /// The last layout, copy or swap action's result; nil before one has finished and while one runs.
+  private(set) var layoutOutcome: LayoutOutcome?
   /// The control that should take focus: the view moves it there and then calls `consumeLayoutFocus`.
   private(set) var layoutFocus: LayoutFocus?
   /// The display chosen to copy to or swap with, by source display. Not sent until a button is pressed.
@@ -193,16 +210,16 @@ final class DisplaysSettingsModel {
       layoutEditor = nil
       switch editor {
       case .new:
-        layoutStatus = L("Display layout saved.")
         // The limit disables Save current layout…, so focus lands on an action that still works.
         let state = controller.displayLayoutsState
         layoutFocus =
           state.isFull
           ? state.layouts.first { $0.unavailableReason == nil }.map { .apply($0.id) } ?? .error
           : .new
+        return L("Display layout saved.")
       case .rename(let id):
-        layoutStatus = L("Layout renamed.")
         layoutFocus = .rename(id)
+        return L("Layout renamed.")
       }
     }
   }
@@ -212,8 +229,8 @@ final class DisplaysSettingsModel {
       try await controller.deleteDisplayLayout(id)
     } onSuccess: {
       layoutDeleteArmed = nil
-      layoutStatus = L("Layout deleted. Current wallpapers are unchanged.")
       layoutFocus = .new
+      return L("Layout deleted. Current wallpapers are unchanged.")
     }
   }
 
@@ -221,7 +238,7 @@ final class DisplaysSettingsModel {
     await performLayoutAction {
       try await controller.applyDisplayLayout(id)
     } onSuccess: {
-      layoutStatus = L("Wallpaper arrangement applied.")
+      L("Wallpaper arrangement applied.")
     }
   }
 
@@ -229,7 +246,7 @@ final class DisplaysSettingsModel {
     await performLayoutAction(from: source) {
       try await controller.copyWallpaper(from: source, to: target)
     } onSuccess: {
-      layoutStatus = L("Wallpaper arrangement applied.")
+      L("Wallpaper arrangement applied.")
     }
   }
 
@@ -237,26 +254,24 @@ final class DisplaysSettingsModel {
     await performLayoutAction(from: first) {
       try await controller.swapWallpapers(first, second)
     } onSuccess: {
-      layoutStatus = L("Wallpaper arrangement applied.")
+      L("Wallpaper arrangement applied.")
     }
   }
 
-  /// Runs a layout, copy or swap action: the status and error of the previous one go, a failure
-  /// lands in the group's error box and takes focus, and a success runs `onSuccess`. `source` is the
-  /// display a copy or swap was started from.
+  /// Runs a layout, copy or swap action: the result of the previous one goes, a failure lands in the
+  /// group's error box and takes focus, and a success runs `onSuccess`, which returns the status to
+  /// show. `source` is the display a copy or swap was started from.
   private func performLayoutAction(
-    from source: String? = nil, _ action: () async throws -> Void, onSuccess: () -> Void
+    from source: String? = nil, _ action: () async throws -> Void, onSuccess: () -> String
   ) async {
-    layoutStatus = nil
-    layoutError = nil
-    transferSource = source
+    layoutOutcome = nil
     do {
       try await action()
-      onSuccess()
+      layoutOutcome = LayoutOutcome(kind: .status(onSuccess()), source: source)
     } catch is CancellationError {
       return
     } catch {
-      layoutError = error.localizedDescription
+      layoutOutcome = LayoutOutcome(kind: .failure(error.localizedDescription), source: source)
       layoutFocus = .error
     }
   }
@@ -469,9 +484,14 @@ final class DisplaysSettingsModel {
 
   // MARK: Time rules
 
-  /// The time rule being edited and the display it belongs to.
-  var ruleEditor: DisplaysRuleDraft?
-  private(set) var ruleEditorDisplay: String?
+  /// A time rule being edited and the display it belongs to.
+  struct RuleEditing {
+    let display: String
+    var draft: DisplaysRuleDraft
+  }
+
+  /// The time rule being edited, if any.
+  var ruleEditing: RuleEditing?
 
   /// Where keyboard focus goes next in the automatic selection rows.
   enum AutomationFocus: Hashable {
@@ -479,6 +499,8 @@ final class DisplaysSettingsModel {
     case editRule(display: String, id: String)
     case firstDay
     case modePicker(display: String)
+    /// The Different wallpaper for each desktop switch.
+    case desktopsToggle(display: String)
     case forget(display: String, desktop: String)
     /// The editor's first control, When, as the editor opens.
     case ruleEvent(display: String)
@@ -488,44 +510,44 @@ final class DisplaysSettingsModel {
 
   func consumeAutomationFocus() { automationFocus = nil }
 
+  /// Takes keyboard focus to a display's Different wallpaper for each desktop switch, for a way in
+  /// from another page.
+  func revealDesktops(display: String) { automationFocus = .desktopsToggle(display: display) }
+
   /// Opens the editor for a new rule, or for `rule` when one is given.
   func beginRule(display: String, editing rule: WallpaperAutomationRule? = nil) {
-    ruleEditorDisplay = display
-    ruleEditor = rule.map(DisplaysRuleDraft.init(editing:)) ?? DisplaysRuleDraft()
+    ruleEditing = RuleEditing(
+      display: display, draft: rule.map(DisplaysRuleDraft.init(editing:)) ?? DisplaysRuleDraft())
     automationFocus = .ruleEvent(display: display)
   }
 
   /// Closes the editor and returns focus to the button that opened it.
   func cancelRule() {
-    if let display = ruleEditorDisplay { automationFocus = Self.restoreFocus(display, ruleEditor?.id) }
-    ruleEditor = nil
-    ruleEditorDisplay = nil
+    if let editing = ruleEditing { automationFocus = Self.restoreFocus(editing.display, editing.draft.id) }
+    ruleEditing = nil
   }
 
   /// Saves the open rule. A rule with no weekday is not sent: the editor says so, and focus goes to
   /// its first day.
   func saveRule() async throws {
-    guard let draft = ruleEditor, let display = ruleEditorDisplay else { return }
+    guard let editing = ruleEditing else { return }
+    let draft = editing.draft, display = editing.display
     switch draft.edit(locale: PanelLocale.shared.locale) {
     case .failure(.noWeekday):
-      ruleEditor?.showsDaysError = true
+      ruleEditing?.draft.showsDaysError = true
       automationFocus = .firstDay
     case .failure:
       return
     case .success(let edit):
       try await controller.saveAutomationRule(edit, display: display)
-      ruleEditor = nil
-      ruleEditorDisplay = nil
+      ruleEditing = nil
       automationFocus = Self.restoreFocus(display, draft.id)
     }
   }
 
   func removeRule(_ id: String, display: String) async throws {
     try await controller.removeAutomationRule(id, display: display)
-    if ruleEditor?.id == id {
-      ruleEditor = nil
-      ruleEditorDisplay = nil
-    }
+    if ruleEditing?.draft.id == id { ruleEditing = nil }
     automationFocus = .addRule(display: display)
   }
 
@@ -534,16 +556,62 @@ final class DisplaysSettingsModel {
   }
 
   /// Forgets the choice saved for a desktop that is gone. Focus goes to the next Forget button of
-  /// the display, else to its mode menu.
+  /// the display, else to its Different wallpaper for each desktop switch.
   func forgetDesktop(_ desktop: String, display: String) async throws {
     let missing = controller.automationState(for: display).missingDesktops.map(\.id)
     try await controller.setAutomationDesktop(desktop, to: nil, display: display)
     let next = missing.drop { $0 != desktop }.dropFirst().first
     automationFocus =
-      next.map { .forget(display: display, desktop: $0) } ?? .modePicker(display: display)
+      next.map { .forget(display: display, desktop: $0) } ?? .desktopsToggle(display: display)
   }
 
   // MARK: Sunrise and sunset
+
+  /// Where the sun rules take their times from.
+  var solarSource: WallpaperSolarSource { controller.solarSettings.source }
+  var solarSunriseMinute: Int { controller.solarSettings.fixedSunriseMinute }
+  var solarSunsetMinute: Int { controller.solarSettings.fixedSunsetMinute }
+
+  /// What the automatic source has to show: the position it keeps up to date, or that it
+  /// has none yet.
+  var solarAutomaticStatus: String {
+    let tracker = controller.solarLocationTracker
+    guard tracker.servicesEnabled else {
+      return L("Location Services is turned off on this Mac. Turn it on in System Settings → Privacy & Security → Location Services.")
+    }
+    if tracker.isDenied {
+      return L("Location access has not been granted yet. Allow it in System Settings → Privacy & Security → Location Services.")
+    }
+    if tracker.authorizationStatus == .notDetermined {
+      return L("Allow location access to calculate sunrise and sunset for this Mac.")
+    }
+    guard let location = controller.solarSettings.location else {
+      return L("Waiting for the current location…")
+    }
+    return String(
+      format: L("Using the current location: %.4f, %.4f"), locale: PanelLocale.shared.locale,
+      location.latitude, location.longitude)
+  }
+
+  /// True once the user has refused location access, where asking again would do nothing.
+  var solarLocationDenied: Bool { controller.solarLocationTracker.isDenied }
+
+  func setSolarSource(_ source: WallpaperSolarSource) async throws {
+    try await controller.setSolarSource(source)
+  }
+
+  /// Updates one of the two fixed times, keeping the other as it is.
+  func setSolarFixedTimes(sunrise: Int? = nil, sunset: Int? = nil) async throws {
+    let current = controller.solarSettings
+    try await controller.setSolarFixedTimes(
+      sunriseMinute: sunrise ?? current.fixedSunriseMinute,
+      sunsetMinute: sunset ?? current.fixedSunsetMinute)
+  }
+
+  /// Retries the permission request without changing the current source.
+  func startAutomaticLocation() async throws {
+    try await controller.requestSolarLocation()
+  }
 
   /// What was typed in the coordinate fields; nil follows the saved location.
   var latitudeText: String?

@@ -1,8 +1,9 @@
 import Foundation
 
-/// The six pages of the first-run guide, in order.
+/// The five pages of the first-run guide, in order. Steam is not one of them: the first Workshop
+/// download asks for an account when it needs one.
 enum WelcomeStep: Int, CaseIterable, Identifiable, Sendable {
-  case language, steam, performance, preferences, tips, start
+  case language, performance, preferences, tips, start
 
   var id: Int { rawValue }
 
@@ -17,7 +18,6 @@ enum WelcomeStep: Int, CaseIterable, Identifiable, Sendable {
   var name: String {
     switch self {
     case .language: L("Language & appearance")
-    case .steam: L("Steam")
     case .performance: L("Performance")
     case .preferences: L("Preferences")
     case .tips: L("Tips")

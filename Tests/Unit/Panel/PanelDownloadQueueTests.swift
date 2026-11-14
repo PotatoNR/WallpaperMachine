@@ -110,15 +110,6 @@ final class PanelDownloadQueueTests: MediaPanelTestCase {
     XCTAssertTrue(all.summary.hasPrefix("Downloading Workshop files…"), "a running job leads the summary")
   }
 
-  func testAFinishedSignInIsNotADownloadButARunningOneIs() {
-    let signedIn = DownloadRow(id: WorkshopStore.signInRequestID, title: "Steam sign-in", isSignInOnly: true)
-    XCTAssertFalse(queue(steam: [signedIn]).isVisible)
-    let signingIn = DownloadRow(
-      id: WorkshopStore.signInRequestID, title: "Steam sign-in", isPending: true, isSignInOnly: true)
-    XCTAssertTrue(queue(steam: [signingIn]).isVisible)
-    XCTAssertEqual(queue(steam: [signingIn]).active.count, 1)
-  }
-
   func testAFailureOrAPromptMarksTheButtonAsNeedingAttention() {
     let failed = DownloadRow(id: "a", title: "A", errorMessage: "Steam denied this download.")
     let asking = DownloadRow(id: "b", title: "B", isPending: true, prompt: .password)
@@ -186,14 +177,13 @@ final class PanelDownloadQueueTests: MediaPanelTestCase {
       queue(steam: [job], slots: 1).note,
       "Downloads run one at a time; the rest wait in order. Steam may still ask you to approve a sign-in."
     )
-    let signIn = DownloadRow(id: WorkshopStore.signInRequestID, title: "S", isSignInOnly: true)
     let work = PixivWork(
       id: "1", title: "T", authorID: "1", authorName: "A", thumbnailURL: nil, width: 1, height: 1,
       pageCount: 1, rating: .everyone, aiGenerated: nil, tags: [], rank: nil)
     let pixiv = DownloadRow(PixivDownloadRow(work: work, pageIndex: 0, status: .paused))
     XCTAssertTrue(
-      queue(steam: [signIn], pixiv: [pixiv]).note.hasPrefix("pixiv downloads run two at a time"),
-      "a finished sign-in is not a Steam download")
+      queue(pixiv: [pixiv]).note.hasPrefix("pixiv downloads run two at a time"),
+      "a queue of pixiv saves alone says how those run")
     XCTAssertTrue(queue(steam: [job], pixiv: [pixiv]).note.hasPrefix("Up to 3"))
   }
 }

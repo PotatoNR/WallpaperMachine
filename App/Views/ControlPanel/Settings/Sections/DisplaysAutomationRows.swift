@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A display's Automatic wallpaper selection disclosure: off, a time schedule, the system
-/// appearance or the desktop Space chooses its wallpaper. A mirrored or disabled display shows it
+/// appearance or a wallpaper for each desktop chooses its wallpaper. A mirrored or disabled display shows it
 /// but cannot change it.
 struct DisplaysAutomationDisclosure: View {
   let display: DisplayRow
@@ -47,14 +47,14 @@ private struct DisplaysAutomationRows: View {
             case .off: L("Off")
             case .schedule: L("Time schedule")
             case .appearance: L("Follow system appearance")
-            case .spaces: L("Follow desktop Space")
+            case .spaces: L("Different wallpaper for each desktop")
             }
           }(), width: 210
         ) {
           Text("Off").tag(DisplayWallpaperAutomation.Mode.off)
           Text("Time schedule").tag(DisplayWallpaperAutomation.Mode.schedule)
           Text("Follow system appearance").tag(DisplayWallpaperAutomation.Mode.appearance)
-          Text("Follow desktop Space").tag(DisplayWallpaperAutomation.Mode.spaces)
+          Text("Different wallpaper for each desktop").tag(DisplayWallpaperAutomation.Mode.spaces)
             .disabled(!state.spacesAvailable)
         }
         .focused($focus, equals: .modePicker(display: display.id))
@@ -88,9 +88,8 @@ private struct DisplaysAutomationRows: View {
           .disabled(locked)
         }
       case .spaces:
-        DisplaysSpaceRows(
-          display: display, state: state, targets: targets, locked: locked, forced: forced,
-          focus: $focus)
+        // The desktops are chosen on the card itself, where the switch is.
+        DisplaysNote(text: L("Each desktop’s wallpaper is chosen above, under Different wallpaper for each desktop."))
       case .schedule:
         DisplaysScheduleRows(
           display: display, state: state, targets: targets, locked: locked, forced: forced,
@@ -100,14 +99,19 @@ private struct DisplaysAutomationRows: View {
       DisplaysAutomationFooter(display: display, state: state, locked: locked, forced: forced)
     }
     .onChange(of: model.automationFocus, initial: true) { _, target in
-      guard let target else { return }
-      focus = target
-      model.consumeAutomationFocus()
+      switch target {
+      case nil, .desktopsToggle, .forget:
+        // The desktop rows take their own focus.
+        break
+      case let target?:
+        focus = target
+        model.consumeAutomationFocus()
+      }
     }
   }
 
-  /// "Manual choices stay until the next rule changes them." and, when Follow desktop Space cannot
-  /// be chosen, why.
+  /// "Manual choices stay until the next rule changes them." and, when a wallpaper for each desktop
+  /// cannot be chosen, why.
   private func modeNote(_ state: AutomationState) -> String {
     let base = L("Manual choices stay until the next rule changes them.")
     guard state.mode != .spaces, let reason = state.spacesUnavailableReason else { return base }
@@ -208,67 +212,6 @@ struct DisplaysTargetPicker: View {
   }
 }
 
-// MARK: - Follow desktop Space
-
-private struct DisplaysSpaceRows: View {
-  let display: DisplayRow
-  let state: AutomationState
-  let targets: AutomationTargets
-  let locked: Bool
-  let forced: Bool
-  var focus: FocusState<DisplaysSettingsModel.AutomationFocus?>.Binding
-
-  @Environment(PanelController.self) private var controller
-
-  var body: some View {
-    let model = controller.displaysSettings
-    DisplaysItemNote(item: DisplaysSettingsSection.automationSpaces, forced: forced)
-    ForEach(state.desktops) { desktop in
-      DisplaysRow(
-        item: DisplaysSettingsSection.automationSpaces,
-        title: desktop.id == state.currentDesktop
-          ? L("Desktop \(desktop.number) (current)") : L("Desktop \(desktop.number)"),
-        note: "", forced: forced, identity: "\(display.id).\(desktop.id)"
-      ) {
-        DisplaysTargetPicker(
-          selection: desktop.target, targets: targets, isRequired: false,
-          key: PanelActionCoordinator.key("automationSpace", id: display.id, detail: desktop.id),
-          commit: {
-            try await controller.setAutomationDesktop(desktop.id, to: $0, display: display.id)
-          }
-        )
-        .disabled(locked || !state.spacesAvailable)
-      }
-    }
-    ForEach(state.missingDesktops) { missing in
-      let name = targets.title(of: missing.target) ?? L("Unavailable")
-      DisplaysRow(
-        item: DisplaysSettingsSection.automationSpaces, title: L("Unavailable desktop"), note: "",
-        forced: forced, identity: "\(display.id).missing.\(missing.id)", labelsControl: false
-      ) {
-        Button("Forget choice for \(name)") {
-          controller.launch(
-            PanelActionCoordinator.key("automationSpace", id: display.id, detail: missing.id)
-          ) { try await model.forgetDesktop(missing.id, display: display.id) }
-        }
-        .focused(focus, equals: .forget(display: display.id, desktop: missing.id))
-        .disabled(locked)
-      }
-    }
-    if state.mode == .spaces, let reason = state.spacesUnavailableReason {
-      DisplaysNote(
-        text: reason == .lockScreenOwnsDesktop
-          ? L("Turn off animated lock-screen wallpaper to use desktop Space choices.")
-          : L("Desktop information is unavailable. Refresh Spaces or choose another automatic mode."),
-        tone: .warning)
-    }
-    DisplaysNote(
-      text: L(
-        "Desktop numbers follow their order on this display; choices follow the desktop when you reorder it. An empty choice keeps the current wallpaper."
-      ))
-  }
-}
-
 // MARK: - Time schedule
 
 private struct DisplaysScheduleRows: View {
@@ -281,13 +224,15 @@ private struct DisplaysScheduleRows: View {
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
+  /// The rule whose Remove was clicked and waits for its answer.
+  @State private var removalArmed: String?
 
   /// A display keeps at most this many rules.
   private static let ruleLimit = 64
 
   var body: some View {
     let model = controller.displaysSettings
-    let editing = model.ruleEditorDisplay == display.id ? model.ruleEditor : nil
+    let editing = model.ruleEditing.flatMap { $0.display == display.id ? $0.draft : nil }
     if state.rules.isEmpty && editing == nil {
       DisplaysNote(text: L("No time rules yet. Add one to choose when this display changes."))
     }
@@ -333,15 +278,27 @@ private struct DisplaysScheduleRows: View {
           .lineLimit(2)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
-      Button("Edit…") { model.beginRule(display: display.id, editing: rule) }
-        .focused(focus, equals: .editRule(display: display.id, id: rule.id))
+      if removalArmed == rule.id {
+        // A rule is removed for good, so it asks first, in the row, as deleting a layout or a
+        // saved playlist does.
+        Text("Remove this rule?")
+          .font(.system(size: 12))
+        Button("Cancel") { removalArmed = nil }
+        Button("Remove") {
+          removalArmed = nil
+          controller.launch(
+            PanelActionCoordinator.key("automationRuleRemove", id: display.id, detail: rule.id)
+          ) { try await model.removeRule(rule.id, display: display.id) }
+        }
+        .foregroundStyle(theme.surface.danger.color)
         .disabled(locked)
-      Button("Remove") {
-        controller.launch(
-          PanelActionCoordinator.key("automationRuleRemove", id: display.id, detail: rule.id)
-        ) { try await model.removeRule(rule.id, display: display.id) }
+      } else {
+        Button("Edit…") { model.beginRule(display: display.id, editing: rule) }
+          .focused(focus, equals: .editRule(display: display.id, id: rule.id))
+          .disabled(locked)
+        Button("Remove") { removalArmed = rule.id }
+          .disabled(locked)
       }
-      .disabled(locked)
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 8)
@@ -424,7 +381,8 @@ private struct DisplaysRuleEditor: View {
 
   var body: some View {
     let model = controller.displaysSettings
-    let draft = Binding(get: { model.ruleEditor ?? DisplaysRuleDraft() }, set: { model.ruleEditor = $0 })
+    let draft = Binding(
+      get: { model.ruleEditing?.draft ?? DisplaysRuleDraft() }, set: { model.ruleEditing?.draft = $0 })
     let value = draft.wrappedValue
     VStack(alignment: .leading, spacing: 10) {
       formRow(L("When")) {
@@ -530,17 +488,24 @@ private struct DisplaysRuleEditor: View {
     .accessibilityLabel(Text(verbatim: DisplaysRuleSummary.fullName(of: day)))
   }
 
-  /// A label and what it labels: side by side while there is room, the label above otherwise.
+  /// A label and what it labels: side by side while there is room, the label above otherwise. The
+  /// labels share the width of the longest in the language on show, so the controls line up and no
+  /// label wraps. That column is `formLabels`: a new row's title goes there too, or its control
+  /// stands out of line in the languages whose label is the longest.
   private func formRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content)
     -> some View
   {
-    DisplaysRowLayout(spacing: 12, fillsControl: true) {
-      Text(verbatim: title)
+    DisplaysRowLayout(spacing: 12, fillsControl: true, keepsTextWidth: true) {
+      ColumnLabel(text: Text(verbatim: title), column: formLabels.map { Text(verbatim: $0) })
         .font(.system(size: 13))
-        .frame(width: 112, alignment: .leading)
       VStack(alignment: .leading, spacing: 0) { content() }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+  }
+
+  /// Every label `formRow` is given, whichever rows the rule shows.
+  private var formLabels: [String] {
+    [L("When"), L("Time"), L("Offset in minutes"), L("Repeat on"), L("Switch to")]
   }
 }
 

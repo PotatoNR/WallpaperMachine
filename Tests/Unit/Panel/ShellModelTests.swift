@@ -327,6 +327,30 @@ final class ShellModelTests: PanelTestCase {
     }
   }
 
+  func testTheViewMenusColumnTogglesActOnlyWhereThePageHasTheColumnAndNeverUnderTheGuide() async throws {
+    try await withPanel { panel in
+      let shell = panel.controller.shell
+      shell.windowWidthChanged(.regular)
+      XCTAssertTrue(shell.canToggleFilters)
+      XCTAssertTrue(shell.canToggleInspector)
+      shell.toggleFilters()
+      XCTAssertTrue(shell.areFiltersShown)
+      let inspector = shell.isInspectorShown
+      shell.toggleInspector()
+      XCTAssertNotEqual(shell.isInspectorShown, inspector)
+
+      await shell.open(.settings).value
+      XCTAssertFalse(shell.canToggleFilters, "Settings has no filters")
+      XCTAssertFalse(shell.canToggleInspector, "nor an inspector")
+
+      await shell.open(.wallpaper).value
+      XCTAssertTrue(shell.canToggleFilters)
+      shell.isWelcomeRequested = true
+      XCTAssertFalse(shell.canToggleFilters, "the guide covers the sidebar")
+      XCTAssertFalse(shell.canToggleInspector, "and the inspector")
+    }
+  }
+
   /// Takes the shell to a narrow window at once.
   private func makeCompact(_ shell: ShellModel) async throws -> Bool {
     let sleeper = ManualSleeper()

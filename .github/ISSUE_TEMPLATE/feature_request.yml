@@ -2,6 +2,20 @@ name: Feature request
 description: Something WallpaperMachine should do, or do differently.
 labels: [enhancement]
 body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where would you use this feature? Choose the closest match.
+      options:
+        - Not sure / other
+        - Lock screen or screen saver
+        - Playback or sound
+        - Displays or Spaces
+        - Scene wallpaper
+        - Web wallpaper
+        - Settings
+        - Steam Workshop or downloads
   - type: markdown
     attributes:
       value: |

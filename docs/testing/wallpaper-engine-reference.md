@@ -5,7 +5,8 @@ An author's preview image, a screenshot attached to an issue, and our own earlie
 render are not targets: previews are often edited or out of date, and an earlier
 render carries our own bugs. `scripts/we_reference.py` captures Wallpaper Engine's
 frames in a Parallels Windows VM, renders the same wallpaper with Native Metal at the
-same size and moment, and puts the two side by side.
+same size and moment, and puts the two side by side. The order of work for a whole
+fix is in [wallpaper-fixes.md](wallpaper-fixes.md).
 
 ## When to use it
 
@@ -21,17 +22,25 @@ same size and moment, and puts the two side by side.
   Engine. A comparison is evidence for a fix, not a gate: it needs the VM, and its
   numbers are coarse.
 
-`render` draws scenes only. Web and video wallpapers can be captured, and their
-frames are still the target, but they are compared by eye with the app's own
-picture.
+`render` draws scenes with Native Metal and web pages with the app's own page host
+(`WebWallpaperPage`, through the opt-in `WebWallpaperReferenceRenderTests`, which
+`render` runs with `scripts/test.py` and never puts on the desktop). Video wallpapers can
+be captured, and their frames are still the target, but they are compared by eye with the
+app's own picture.
 
 ## Setup
 
 - Parallels Desktop with a Windows 11 VM on Parallels' Shared network, where the Mac
   is `10.211.55.2`. Inside the VM: Steam signed in and Wallpaper Engine installed
   under Steam's library. With Parallels Desktop Standard, `prlctl` can list VMs but
-  not resume them or run commands in them, so the VM is woken by opening it and the
-  worker line is pasted into PowerShell inside it.
+  not resume them or run commands in them, so the VM is woken by opening it
+  (`open -a "Parallels Desktop"` resumes it) and the worker is started by the
+  background poller installed in it (see [Capturing](#capturing)).
+- A wallpaper missing from the app's library is downloaded with
+  `python3 scripts/we_reference.py fetch <id> --into artifacts/<task>`. It runs a
+  scratch copy of the app's SteamCMD with the app's saved Steam sign-in, never signs
+  in, deletes the copy (it holds the session) and leaves `artifacts/<task>/<id>/`.
+  `unpack <wallpaper> --into <dir>` extracts a wallpaper's `scene.pkg` for reading.
 - `metal_scene_draw_smoke` built in this tree: `python3 scripts/check_renderer.py`
   builds it into `artifacts/renderer/bin/tests/`. A binary built before the change
   you are judging renders that change's "before"; pass it with `--binary`.
@@ -42,10 +51,22 @@ picture.
 python3 scripts/we_reference.py capture 2440387496 2850003448
 ```
 
-The script serves the listed wallpapers on the Shared network only and prints one
-PowerShell line, `iex (irm http://10.211.55.2:8765/worker.ps1)`, to run inside the VM.
-A wallpaper is a Workshop id in the app's library or a folder that holds
-`project.json`. For each one the worker:
+The script serves the listed wallpapers on the Shared network only. A wallpaper is a
+Workshop id in the app's library or a folder that holds `project.json` (a folder of
+generated probe scenes works too: an opaque `util/white` sprite per case reads a rule
+off Wallpaper Engine's frame to the 8-bit level). The VM's background poller runs the
+worker within seconds, so a capture needs no keystrokes in the VM and never takes the
+Mac's focus. Without the poller, the script's printed line
+`iex (irm http://10.211.55.2:8765/worker.ps1)` runs the worker once from PowerShell in
+the VM.
+
+The poller is installed once, from PowerShell in the VM while a capture is serving:
+`iex (irm http://10.211.55.2:8765/install-poller.ps1)`. It writes
+`%LOCALAPPDATA%\we-reference\poller.ps1`, adds a `we-reference-poller` shortcut to the
+user's Startup folder and starts it hidden; it fetches `worker.ps1` from the Mac every
+five seconds and runs it when a capture answers, one poller per Windows session. It runs
+whatever that address serves, so it belongs only in this test VM. Remove the shortcut and
+end its `powershell.exe` to uninstall. For each wallpaper the worker:
 
 - copies the wallpaper's files into `%LOCALAPPDATA%\we-reference\<id>` in the VM,
   fetching only files that are missing there or whose size changed;
@@ -53,20 +74,26 @@ A wallpaper is a Workshop id in the app's library or a folder that holds
   opening anything. It never unmutes;
 - opens the wallpaper on monitor 0 with `wallpaper64.exe -control openWallpaper`,
   hides the desktop icons, minimises every window and centres the cursor;
-- takes two screenshots of the whole primary display at physical pixels, about 8 s
-  and 15 s after opening, and records when it opened the wallpaper and when it took
+- takes two screenshots of the whole primary display at physical pixels, about 30 s
+  and 45 s after opening (`--delays FIRST SECOND` changes them: Wallpaper Engine in the VM
+  can take more than 15 s to show a heavy scene, and an earlier shot catches the previous
+  wallpaper or a black desktop), and records when it opened the wallpaper and when it took
   each shot. The real times are used for rendering: the first wallpaper after
   Wallpaper Engine starts has been shot 10 s and 30 s in;
 - pauses Wallpaper Engine until the next job and shows the icons again at the end.
 
 The script exits when every wallpaper was captured or failed, or after `--timeout`
-seconds. Put the VM back to sleep afterwards (Parallels: Actions > Suspend).
+seconds. Put the VM back to sleep afterwards (Parallels: Actions > Suspend; without
+taking focus: `osascript -e 'tell application "System Events" to tell process
+"prl_client_app" to click menu item "Suspend" of menu "Actions" of menu bar 1'`).
 
-Driving the VM from an agent: synthetic typing into the VM window drops keys or
-leaves one held down. Use the shared clipboard instead (write the line, click into
-PowerShell, press Cmd+V), and open PowerShell from the taskbar search. The first
-click into the VM window may only capture the pointer. Wallpaper Engine stays muted.
-Never change the Mac's volume.
+Driving the VM from an agent is needed only to install the poller, and takes the Mac's
+focus: Parallels reads input only while its window is frontmost, so no background
+automation reaches the guest. Synthetic clicks may not reach the guest either and
+synthetic typing drops keys or leaves one held down; activate Parallels, press Ctrl+Esc
+for Start, and paste through the shared clipboard (write the text, press Cmd+V, then
+Return), `powershell` into Start search and then the install line. Wallpaper Engine
+stays muted. Never change the Mac's volume.
 
 ## Rendering and comparing
 
@@ -76,8 +103,9 @@ python3 scripts/we_reference.py render 2440387496 --label after
 python3 scripts/we_reference.py compare 2440387496 --labels before,after
 ```
 
-`render` runs `metal_scene_draw_smoke`'s renderer comparison
-(`*DrawTheSamePictureOnBothRenderers*` with `WE_TEST_COMPARE_NATIVE_ONLY`, see
+`render` runs `metal_scene_draw_smoke`'s poster test
+(`LocalProjectsDrawAPosterPicture`; a binary built before the Vulkan path was removed
+names it `DrawTheSamePictureOnBothRenderers`, with `WE_TEST_COMPARE_NATIVE_ONLY`, see
 [renderer.md](renderer.md#probe-environment-variables)) for each shot, matching it as
 closely as the harness allows:
 
@@ -89,6 +117,19 @@ closely as the harness allows:
   wallpaper, so clocks and day/night scripts show the same hour. The date can differ;
 - the pointer at the centre of the screen, silence (`WE_TEST_AUDIO_HZ=0`), and a fixed
   particle seed.
+
+A web page is shown at the shot's pixel size on this Mac's backing scale (3456 x 2024
+pixels is 1728 x 1012 points on a Retina display), given the project's own property values
+as the host first delivers them, with no audio captured and nothing saved, and snapshotted
+as long after loading as Wallpaper Engine's shot was taken after opening. Beside the
+pictures, `<id>.json` records the page's viewport, `devicePixelRatio`, the errors it raised,
+and, over the 10 s after the last shot, the CPU its WebContent process and the WebKit GPU
+process used, the Mac's GPU utilization, the WebContent footprint (mean and peak of four
+readings a second; a page's heap rises and falls with its garbage collection, so one
+reading says little) and the animation frames per second, so a change that costs
+performance shows next to the picture it buys. The figures come from a page in a window
+that is never shown, at whatever else this Mac is doing (the GPU figure is the whole
+Mac's): compare them between renders made one after the other.
 
 `compare` writes one sheet per shot: Wallpaper Engine's frame, each render in
 `--labels` order, and the difference between Wallpaper Engine and the last render

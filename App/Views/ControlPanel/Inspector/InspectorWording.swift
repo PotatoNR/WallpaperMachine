@@ -176,13 +176,42 @@ enum InspectorWording {
     }
   }
 
-  /// "Drawn now by metal", with its fallback reason when it has one.
-  static func backendLine(_ state: CompatibilityState) -> String? {
-    guard let backend = state.backend else { return nil }
-    if let reason = state.fallbackReason, !reason.isEmpty {
-      return L("Drawn now by \(backend) (fallback: \(reason))")
+  /// What draws the wallpaper on the target display now, as the Compatibility check card says it.
+  struct BackendLine: Equatable {
+    /// In plain words: Native Metal, the native video player, or only that it plays here; or that
+    /// it is not playing, and why, when the report carries a problem.
+    let text: String
+    /// "Renderer: native_metal", the renderer's own id as a problem report quotes it; nil for a
+    /// scene nothing draws.
+    let detail: String?
+  }
+
+  /// What draws the wallpaper on this display, in words, with the renderer's id beneath; or the
+  /// held-scene sentence when Native Metal is the only renderer and could not draw it: nothing draws
+  /// it, so no renderer is named. Nil until the runtime reports one, including the engine's
+  /// "unknown", which names nothing.
+  ///
+  /// A report with a reason (the bridge's `fallback_reason`) names the renderer that would draw it
+  /// and the problem that stops it: today only a video whose file cannot be found, which nothing
+  /// plays. The line then leads with that problem and never says the wallpaper plays.
+  static func backendLine(_ state: CompatibilityState) -> BackendLine? {
+    if let failure = state.failure {
+      let sentence = failure.stage.sentence(reason: failure.reason)
+      return BackendLine(text: sentence.prefix(1).uppercased() + sentence.dropFirst(), detail: nil)
     }
-    return L("Drawn now by \(backend)")
+    guard let id = state.backend else { return nil }
+    let reason = state.fallbackReason ?? ""
+    let text: String
+    switch SceneBackend(name: id) {
+    case .preparing: return nil
+    case _ where !reason.isEmpty: text = L("Not playing on this display (reason: \(reason)).")
+    case .nativeMetal: text = L("Drawn on this display by Native Metal, the app’s own renderer.")
+    // The bridge's word for a video the native player plays (`RUNNING_BACKEND_NATIVE`).
+    case .other("native"): text = L("Played on this display by the native video player.")
+    // A renderer this build has no words for: said only to play, named in the detail.
+    case .other: text = L("Playing on this display.")
+    }
+    return BackendLine(text: text, detail: L("Renderer: \(id)"))
   }
 
   // MARK: Black bars
@@ -268,7 +297,31 @@ enum InspectorWording {
     case .stretch: L("Stretch")
     case .match: L("Fit")
     case .fill: L("Fill")
+    case .matchBlurred: L("Fit with blurred backdrop")
     }
+  }
+
+  // MARK: Displays
+
+  /// The line under a display card's name beside another display (`InspectorPolicy
+  /// .summarizesDisplays`), parts joined by " · ": the scaling mode, with its scale factor when that
+  /// is not 1; the frame rate, or the note of the ceiling that holds the display below it (a choice
+  /// says what overrides it), and none for a clip the native player plays at its own rate. A
+  /// disabled display is Disabled. A value waiting for Apply changes is the card's Not applied mark,
+  /// drawn apart from this line so that cutting the line short never hides it.
+  static func displaySummary(_ display: InspectorOptions.DisplayRow, locale: Locale? = nil) -> String {
+    var parts: [String] = []
+    if display.isEnabled {
+      let mode = scalingModeName(display.scalingMode)
+      parts.append(
+        display.scalingFactor == 1 ? mode : mode + " ×" + factor(display.scalingFactor, locale: locale))
+      if InspectorPolicy.offersFrameRate(for: display) {
+        parts.append(display.frameRateLimit?.note ?? L("\(display.frameRate) fps"))
+      }
+    } else {
+      parts.append(L("Disabled"))
+    }
+    return parts.joined(separator: " · ")
   }
 
   /// The factor the Black bars card may stage, when there is one to set.

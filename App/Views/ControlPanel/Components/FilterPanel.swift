@@ -43,7 +43,7 @@ private struct FilterSidebarToggle: View {
       controller.shell.toggleFilters()
     } label: {
       Image(systemName: "sidebar.left")
-        .font(.system(size: 13, weight: .medium))
+        .font(.panel(.control))
         .frame(width: 18, height: 18)
     }
     .modifier(SidebarToggleStyle())
@@ -95,7 +95,7 @@ struct FilterGroup<Content: View>: View {
         .padding(.vertical, 6)
     } label: {
       HStack {
-        title.font(.system(size: 13, weight: .semibold))
+        title.font(.panel(.sectionHeader))
         if count > 0 { CountBadge(count: count) }
       }
     }

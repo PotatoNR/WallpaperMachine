@@ -9,11 +9,19 @@ import XCTest
 @MainActor
 final class SettingsSectionsLocalizationTests: XCTestCase {
   private static let sections: [SettingsSection] = [
-    .quick, .general, .appearance, .desktop, .playback, .performance,
+    .quick, .general, .appearance, .desktop, .widgets, .playback, .performance,
     .displays, .shortcuts, .library, .storage, .about,
   ]
-  /// Words that are the same in every language on purpose: figures, units and file names.
-  private static let sameEverywhere: Set<String> = []
+  /// Words that are the same in every language on purpose: figures, units, file names and names.
+  private static let sameEverywhere: Set<String> = ["MMFoundation"]
+  /// Phrases a language writes exactly as English does: Portuguese shares these words, and macOS
+  /// keeps Spaces in English.
+  private static let sameIn: [String: Set<String>] = [
+    "pt-BR": [
+      "App", "Backup", "CPU", "Downloads", "Experimental", "GPU", "Interface", "Latitude",
+      "Longitude", "min", "Neon", "normal", "Playlist", "Spaces", "SteamCMD", "Volume", "Web",
+    ]
+  ]
 
   private var items: [SettingsItem] {
     SettingsRegistry.items.filter { Self.sections.contains($0.section) }
@@ -28,7 +36,9 @@ final class SettingsSectionsLocalizationTests: XCTestCase {
         for resource in resources {
           let base = english.string(resolving: resource)
           let translated = locale.string(resolving: resource)
-          guard !Self.sameEverywhere.contains(base) else { continue }
+          guard !Self.sameEverywhere.contains(base), !Self.sameIn[language.tag, default: []].contains(base) else {
+            continue
+          }
           XCTAssertNotEqual(
             translated, base, "\(item.id) in \(language.tag) is still English: \(base.prefix(60))")
           XCTAssertFalse(
@@ -49,17 +59,21 @@ final class SettingsSectionsLocalizationTests: XCTestCase {
         (QualityPreset.low.title, "Low"), (QualityPreset.medium.title, "Medium"), (QualityPreset.high.title, "High"),
         (QualityPreset.customTitle, "Custom"),
         (DesktopCoveredAction.keepRunning.title, "Keep running"), (OtherAudioAction.mute.title, "Mute"),
+        (DesktopCoveredAction.mute.title, "Mute"), (DesktopCoveredAction.reduceVolume.title, "Reduce volume"),
+        (OtherAudioAction.reduceVolume.title, "Reduce volume"),
         (DisplaySleepAction.stop.title, "Stop (free memory)"),
         (SystemConditionAction.reduceQuality.title, "Reduced quality"),
         (BridgeBatteryMode.pause.title, "Pause"), (AppRuleCondition.frontmost.title, "In front"),
         (AppRuleAction.stop.title, "Stop"), (AppThemePreferences.Mode.system.title, "System (Auto)"),
         (AppThemePreferences.Tone.warm.title, "Warm"), (AppThemePreferences.Icon.night.title, "Night"),
-        (VideoBackendMode.nativePreferred.title, "Native video preferred"),
-        (SceneRendererMode.nativeMetalPreferred.title, "Native Metal preferred"),
         (SceneResolutionMode.display.title, "Display resolution"),
         (SceneResolutionMode.canvas.title, "Canvas size"),
+        (BridgeQualityLevel.ultra.title, "Ultra"), (BridgePostProcessing.enabled.title, "Enabled"),
+        (BridgePostProcessing.disabled.title, "Disabled"),
+        (BridgePostProcessing.displayHdr.title, "Display HDR"),
+        (BridgeMsaa.off.title, "Off"),
         (QualityCause.heat.statusText, "The Mac is hot. Reduced quality is in use."),
-        (EnergyReadout.Caveat.nativeVideo.title, "Native video not counted"),
+        (EnergyReadout.Caveat.nativeVideo.title, "Video not counted"),
         (EnergyReadout.title(for: .high), "High energy use"),
         (FrameRateCapSlider(refreshRate: 60).readout(atPosition: 61), "No limit"),
         (GeneralSettingsSection.languageOptions()[0].title, "System (Auto)"),

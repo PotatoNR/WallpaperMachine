@@ -7,16 +7,13 @@ import SwiftUI
 /// button. The tiles and the inspector carry each download's own state; this carries the batch's.
 struct DownloadsToolbarButton: View {
   /// Whether the toolbar shows the button: a download, a request waiting for a prerequisite, or a
-  /// pixiv save. A finished sign-in is not a download and does not count while it is over.
+  /// pixiv save.
   ///
   /// The toolbar asks on every change of the window's content, so this reads only what changes when
-  /// a download starts or ends (the lists and the sign-in's state), never a job's progress.
+  /// a download starts or ends (the lists), never a job's progress.
   static func isActive(in controller: PanelController) -> Bool {
     let workshop = controller.workshop
-    if !workshop.downloadRequests.isEmpty { return true }
-    if workshop.downloader.downloads.contains(where: { !$0.isSignIn || $0.isPending }) {
-      return true
-    }
+    if !workshop.downloadRequests.isEmpty || !workshop.downloader.downloads.isEmpty { return true }
     return !controller.pixiv.downloads.downloads.isEmpty
   }
 
@@ -49,7 +46,7 @@ struct DownloadsToolbarButton: View {
     .accessibilityLabel(Text(verbatim: queue.buttonLabel))
     .accessibilityIdentifier("downloads-button")
     .popover(isPresented: $model.isQueuePopoverOpen, arrowEdge: .bottom) {
-      DownloadsPopover()
+      DownloadsPopover().panelPresentationLocale()
     }
   }
 }

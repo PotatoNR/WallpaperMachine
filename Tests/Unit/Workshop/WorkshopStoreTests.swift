@@ -125,6 +125,44 @@ final class WorkshopStoreTests: XCTestCase {
       WorkshopDownloadManager.concurrentDownloadRange.upperBound)
   }
 
+  /// The sort and filters searched with outlive a relaunch, as after an update; a draft that was
+  /// never searched does not, and a stored list larger than a search accepts leaves the defaults.
+  func testSearchedSortAndFiltersSurviveRelaunch() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let relaunch = {
+      WorkshopStore(
+        downloader: WorkshopDownloadManager(
+          sessionDirectory: fixture.root.appendingPathComponent("SteamSession")),
+        supportDirectory: fixture.root, defaults: fixture.defaults)
+    }
+    let fresh = relaunch()
+    XCTAssertEqual(fresh.sort, .trendingYear)
+    XCTAssertEqual(fresh.tags, [])
+    XCTAssertEqual(fresh.excludedTags, WorkshopStore.defaultExcludedTags)
+
+    let store = fixture.store
+    store.sort = .topRated
+    store.tags = ["Approved", "Anime"]
+    store.excludedTags = ["Application", "Asset", "Web"]
+    store.search()
+    store.sort = .newest
+    store.tags = []
+
+    let restored = relaunch()
+    XCTAssertEqual(restored.sort, .topRated)
+    XCTAssertEqual(restored.tags, ["Approved", "Anime"])
+    XCTAssertEqual(restored.excludedTags, ["Application", "Asset", "Web"])
+
+    fixture.defaults.set(
+      ["sort": "unknown", "tags": Array(repeating: "Anime", count: 40), "excludedTags": []],
+      forKey: WorkshopStore.browseFiltersKey)
+    let rejected = relaunch()
+    XCTAssertEqual(rejected.sort, .trendingYear)
+    XCTAssertEqual(rejected.tags, [])
+    XCTAssertEqual(rejected.excludedTags, WorkshopStore.defaultExcludedTags)
+  }
+
   func testFailedPageAndFailedSubmissionRetryTheirOwnQueryWithoutChangingDraft() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -315,6 +353,64 @@ final class WorkshopStoreTests: XCTestCase {
     }
   }
 
+  /// A search replaced in the same turn, before it has asked Steam for anything, must never
+  /// answer for the search that replaced it: Steam answers each request with its own query.
+  func testSearchReplacedBeforeItStartsNeverAnswersForItsReplacement() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let store = fixture.store
+    store.searchText = "forest"
+    store.search()
+    store.searchText = "rain"
+    store.search()
+    try await serve(fixture, store, pages: [
+      "forest": [1: pageHTML(id: "101", page: 1, pages: 9, count: 270)],
+      "rain": [1: pageHTML(id: "201", page: 1, pages: 2, count: 33)],
+    ])
+    assertPage(store, id: "201", page: 1, pages: 2, count: 33)
+    assertBrowseURL(store, text: "rain", kind: .all, sort: .trendingYear, page: 1)
+    XCTAssertNil(store.errorMessage)
+  }
+
+  /// A page asked for just before a new search, which Steam answers only after the new search's
+  /// first page, must never be shown, or kept, as a page of the new search.
+  func testPageAskedForJustBeforeANewSearchNeverAnswersForIt() async throws {
+    for prefetches in [false, true] {
+      let fixture = try Fixture()
+      defer { fixture.remove() }
+      let store = fixture.store
+      store.prefetchesNextPage = prefetches
+      // Two pages each, so the second has nothing after it to prefetch.
+      let pages: [String: [Int: Data]] = [
+        "forest": [
+          1: try pageHTML(id: "101", page: 1, pages: 2, count: 60),
+          2: try pageHTML(id: "102", page: 2, pages: 2, count: 60),
+        ],
+        "rain": [
+          1: try pageHTML(id: "201", page: 1, pages: 2, count: 45),
+          2: try pageHTML(id: "202", page: 2, pages: 2, count: 45),
+        ],
+      ]
+      store.searchText = "forest"
+      store.search()
+      try await fixture.held(text: "forest", page: 1).succeed(pages["forest"]![1]!)
+      try await finished(store)
+      store.loadPage(2)
+      store.searchText = "rain"
+      store.search()
+      // Out of order: the new search's first page answers while the older page is still held.
+      try await fixture.held(text: "rain", page: 1).succeed(pages["rain"]![1]!)
+      try await finished(store)
+      assertPage(store, id: "201", page: 1, pages: 2, count: 45)
+
+      store.loadPage(2)
+      try await serve(fixture, store, pages: pages)
+      assertPage(store, id: "202", page: 2, pages: 2, count: 45)
+      assertBrowseURL(store, text: "rain", kind: .all, sort: .trendingYear, page: 2)
+      XCTAssertNil(store.errorMessage)
+    }
+  }
+
   func testCancellationDoesNotClaimInitialSuccessOrDiscardLoadedPage() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -481,6 +577,28 @@ final class WorkshopStoreTests: XCTestCase {
     try await waitUntil { !store.isLoading }
   }
 
+  /// Answers every request as it arrives with the page `pages` holds for its own search text and
+  /// page number, until the store has stopped loading and no request is left.
+  private func serve(
+    _ fixture: Fixture, _ store: WorkshopStore, pages: [String: [Int: Data]]
+  ) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while store.isLoading || fixture.inbox.hasRequest {
+      guard ContinuousClock.now < deadline else { throw FixtureError.timedOut }
+      guard fixture.inbox.hasRequest else {
+        try await Task.sleep(for: .milliseconds(2))
+        continue
+      }
+      let pending = fixture.inbox.take()
+      let (text, page) = Fixture.searchAndPage(of: pending)
+      guard let body = text.flatMap({ pages[$0] })?[page ?? 0] else {
+        pending.fail(URLError(.badURL))
+        throw FixtureError.unexpectedRequest(pending.request.url)
+      }
+      pending.succeed(body)
+    }
+  }
+
   private func pageHTML(
     id: String, title: String = "Fixture wallpaper", kind: WorkshopKind = .scene,
     page: Int, pages: Int, count: Int
@@ -595,6 +713,29 @@ final class WorkshopStoreTests: XCTestCase {
       return pending
     }
 
+    /// The request for page `page` of `text`, held unanswered, wherever it waits among the
+    /// requests Steam received; the others stay queued in the order they arrived.
+    func held(text: String, page: Int) async throws -> WorkshopFixtureProtocol {
+      var found: WorkshopFixtureProtocol?
+      try await WorkshopStoreTests.waitUntil {
+        found = self.inbox.take {
+          let (asked, number) = Self.searchAndPage(of: $0)
+          return asked == text && number == page
+        }
+        return found != nil
+      }
+      return found!
+    }
+
+    static func searchAndPage(of pending: WorkshopFixtureProtocol) -> (String?, Int?) {
+      let values =
+        URLComponents(url: pending.request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      return (
+        values.first { $0.name == "searchtext" }?.value,
+        values.first { $0.name == "p" }?.value.flatMap { Int($0) }
+      )
+    }
+
     func reply(
       text: String, kind: WorkshopKind, sort: WorkshopSort, page: Int, body: Data,
       status: Int = 200,
@@ -634,6 +775,10 @@ private final class WorkshopRequestInbox: @unchecked Sendable {
   var hasRequest: Bool { lock.withLock { !pending.isEmpty } }
   func append(_ request: WorkshopFixtureProtocol) { lock.withLock { pending.append(request) } }
   func take() -> WorkshopFixtureProtocol { lock.withLock { pending.removeFirst() } }
+  /// Removes and returns the first request `matches` accepts, or nil while none does.
+  func take(where matches: (WorkshopFixtureProtocol) -> Bool) -> WorkshopFixtureProtocol? {
+    lock.withLock { pending.firstIndex(where: matches).map { pending.remove(at: $0) } }
+  }
 }
 
 private final class WorkshopFixtureProtocol: URLProtocol, @unchecked Sendable {
@@ -951,40 +1096,47 @@ final class WorkshopDownloadIntentTests: XCTestCase {
       fixture.store.downloader.downloads.map(\.id), [WorkshopStore.sceneAssetsRequestID])
   }
 
-  /// An installed scene wallpaper needs no consent step once its shared assets exist.
-  /// The welcome guide signs in ahead of any download: the intent waits for SteamCMD like a
-  /// download, never asks about shared resources, and runs as a sign-in-only job.
-  func testSignInRequestWaitsForSetupThenSignsInWithoutADownload() async throws {
+  /// SteamCMD ending a download before Steam accepted the sign-in, with no reason given, has
+  /// Valve's newest looked for; a download that failed so is tried again once, and only when
+  /// SteamCMD changed.
+  func testADownloadThatEndsForNoReasonIsTriedAgainOnceAfterSteamCMDChanged() async throws {
     let fixture = try makeFixture()
-    fixture.store.requestSignIn(account: "localtest", rememberSession: true, bridge: fixture.bridge)
-    XCTAssertEqual(fixture.store.downloadRequests.map(\.id), [WorkshopStore.signInRequestID])
-    XCTAssertEqual(try stage(fixture.store), .setup)
-    XCTAssertTrue(fixture.store.downloader.downloads.isEmpty)
-
+    let launches = home.appendingPathComponent("launches")
+    try Data("#!/bin/sh\nprintf x >> '\(launches.path)'\nprintf 'Logging in user to Steam Public...\\n'\nexit 8\n".utf8)
+      .write(to: fixture.executable)
+    var checks: [TimeInterval] = []
+    var updated = true
+    fixture.store.updateSteamCMD = { interval in
+      checks.append(interval)
+      return updated
+    }
     try await makeSetupReady(fixture)
-    fixture.store.resumeDownloadRequests(bridge: fixture.bridge)
-    XCTAssertTrue(fixture.store.downloadRequests.isEmpty, "Finishing setup resumes the sign-in on its own")
-    let job = try XCTUnwrap(fixture.store.downloader.signIn)
-    XCTAssertEqual(fixture.store.downloader.downloads.map(\.id), [WorkshopStore.signInRequestID])
-    XCTAssertTrue(job.isSignIn)
-    XCTAssertNil(job.item)
-    try await waitUntil { !job.isQueued }
-    XCTAssertTrue(job.worker.isSigningInOnly)
-    XCTAssertFalse(job.worker.isInstallingAssets)
+    fixture.store.username = "localtest"
+    func launched() -> Int { (try? Data(contentsOf: launches).count) ?? 0 }
 
-    // A second request while one runs shows the running job instead of starting another.
-    fixture.store.requestSignIn(account: "localtest", rememberSession: true, bridge: fixture.bridge)
-    XCTAssertEqual(fixture.store.downloader.downloads.count, 1)
-    XCTAssertEqual(fixture.store.selectedDownloadID, WorkshopStore.signInRequestID)
+    fixture.store.requestDownload(item: video, rememberSession: true, bridge: fixture.bridge)
+    try await waitUntil { launched() == 2 && fixture.store.downloader.download(for: video.id)?.isPending == false }
+    XCTAssertEqual(checks, [SteamCMDSetupStore.failureUpdateCheckInterval])
+    XCTAssertNotNil(fixture.store.downloader.download(for: video.id)?.errorMessage)
+    // The retry failed too: what an update could fix, it did not, so the failure is the user's.
+    try await Task.sleep(for: .milliseconds(200))
+    XCTAssertEqual(launched(), 2)
+    XCTAssertEqual(checks.count, 1)
 
-    // An empty account is refused up front and retained for correction, as for a download.
-    fixture.store.downloader.cancel(job)
-    try await waitUntil { !job.isPending }
-    fixture.store.requestSignIn(account: "", rememberSession: true, bridge: fixture.bridge)
-    XCTAssertEqual(try stage(fixture.store), .account)
-    XCTAssertEqual(fixture.store.downloader.downloads.count, 1, "No job starts without an account")
+    // When SteamCMD did not change, nothing is tried again.
+    updated = false
+    try FileManager.default.removeItem(at: launches)
+    let other = WorkshopItem(
+      id: "444", title: "Second video", creator: "Test", summary: "",
+      previewURL: nil, tags: ["Video"], size: 0, subscriptions: 0)
+    fixture.store.requestDownload(item: other, rememberSession: true, bridge: fixture.bridge)
+    try await waitUntil { checks.count == 2 }
+    try await Task.sleep(for: .milliseconds(200))
+    XCTAssertEqual(launched(), 1)
+    XCTAssertEqual(fixture.store.downloader.download(for: other.id)?.isPending, false)
   }
 
+  /// An installed scene wallpaper needs no consent step once its shared assets exist.
   func testSceneSkipsResourceConsentWhenAssetsAreReady() async throws {
     let fixture = try makeFixture(sceneAssetsReady: true)
     try await makeSetupReady(fixture)
@@ -1021,6 +1173,25 @@ final class WorkshopDownloadIntentTests: XCTestCase {
     XCTAssertTrue(restored.store.resumeDownloadRequest(id: video.id, bridge: restored.bridge))
     try await waitUntil { restored.store.downloader.download(for: self.video.id)?.isPending == true }
     XCTAssertTrue(restored.store.downloadRequests.isEmpty)
+  }
+
+  /// Only the shared assets are requested without an item. Any other item-less request in the
+  /// saved file has nothing to download: a relaunch drops it rather than taking it for them.
+  func testAnItemlessRequestOtherThanTheSharedAssetsIsDroppedOnRelaunch() throws {
+    let original = try makeFixture()
+    original.store.username = "localtest"
+    original.store.requestDownload(item: video, rememberSession: false, bridge: original.bridge)
+    let file = home.appendingPathComponent("Downloads/workshop-requests.json")
+    var saved = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [[String: Any]])
+    var itemless = try XCTUnwrap(saved.first)
+    itemless["id"] = "itemless"
+    itemless.removeValue(forKey: "item")
+    saved.append(itemless)
+    try JSONSerialization.data(withJSONObject: saved).write(to: file)
+
+    let restored = try makeFixture()
+    XCTAssertEqual(restored.store.downloadRequests.map(\.id), [video.id])
   }
 
   func testCancellingARestoredJobWaitingForSetupCannotRestartItLater() async throws {

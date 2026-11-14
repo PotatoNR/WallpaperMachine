@@ -156,7 +156,7 @@ final class EnergyUsageMonitor {
   }
 
   private let source: EnergyUsageSource?
-  private let interval: Duration
+  private(set) var interval: Duration
   private let batteryWattHours: @MainActor () -> Double?
   /// Read once per activation; a battery's full charge moves over months, not minutes. Watt-hours,
   /// nil on a Mac without a battery. Readable so the panel's typed readout can word the battery share.
@@ -213,8 +213,31 @@ final class EnergyUsageMonitor {
     }
     batteryCapacity = batteryWattHours()
     publish(.measuring)
+    run(source)
+  }
+
+  /// Samples every `interval` from now on. While active the loop starts again with the samples it
+  /// holds, so the reading on show carries on instead of measuring afresh: the window is measured
+  /// between its samples, not assumed. The next sample comes `interval` after the last one, or now
+  /// when that has passed, so no interval is shorter than the new one.
+  func setInterval(_ interval: Duration, now: UInt64 = DispatchTime.now().uptimeNanoseconds) {
+    guard interval != self.interval else { return }
+    self.interval = interval
+    guard task != nil, let source else { return }
+    task?.cancel()
+    var delay = Duration.zero
+    if let last = samples.last?.sample.uptimeNanoseconds, now > last {
+      delay = max(.zero, interval - .nanoseconds(Int64(clamping: now - last)))
+    } else if samples.last != nil {
+      delay = interval
+    }
+    run(source, after: delay)
+  }
+
+  private func run(_ source: EnergyUsageSource, after delay: Duration = .zero) {
     let interval = interval
     task = Task { @MainActor [weak self] in
+      if delay > .zero { try? await Task.sleep(for: delay) }
       while !Task.isCancelled {
         let sample = await Task.detached(priority: .utility) { source.sample() }.value
         guard !Task.isCancelled, let self else { return }

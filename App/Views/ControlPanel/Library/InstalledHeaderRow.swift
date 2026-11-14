@@ -1,11 +1,18 @@
 import SwiftUI
 
-/// How much room the row has: with all the words, with icons only, or with icons only and closer
-/// together (the page beside an inspector in the smallest window).
-private enum HeaderTier {
+/// How much room either bar above the Library grid has (this header row and the views row,
+/// `InstalledScopeBar`): room for all the words, for fewer, or for the fewest and closer together
+/// (the page beside an inspector in the smallest window). Each bar picks its tier with a
+/// `ViewThatFits` around the whole row and says in its own documentation what each tier drops;
+/// this header row keeps only its icons from `compact` on.
+enum HeaderTier {
   case regular, compact, tight
 
   var showsLabels: Bool { self == .regular }
+
+  /// The room inside a capsule (`ToolbarCapsuleButtonStyle`): less in the tight tier, so the
+  /// controls stay on one row.
+  var capsulePadding: CGFloat { self == .tight ? 7 : 10 }
 }
 
 /// The slim row under the toolbar: Filter and the sort on the left; Select, Refresh and Import on
@@ -33,45 +40,6 @@ struct InstalledHeaderRow: View {
   }
 }
 
-/// `ToolbarCapsuleButtonStyle`, with less padding for the tight tier.
-private struct HeaderCapsuleStyle: ButtonStyle {
-  let tier: HeaderTier
-  var isActive = false
-
-  func makeBody(configuration: Configuration) -> some View {
-    HeaderCapsuleBody(configuration: configuration, tier: tier, isActive: isActive)
-  }
-}
-
-private struct HeaderCapsuleBody: View {
-  let configuration: ButtonStyleConfiguration
-  let tier: HeaderTier
-  let isActive: Bool
-
-  @Environment(\.panelTheme) private var theme
-  @Environment(\.isEnabled) private var isEnabled
-  @State private var isHovering = false
-
-  var body: some View {
-    configuration.label
-      .font(.system(size: 12.5, weight: .medium))
-      .foregroundStyle(isActive ? theme.accent.accent.color : theme.surface.text.color)
-      .lineLimit(1)
-      .padding(.horizontal, tier == .tight ? 7 : 10)
-      .frame(minHeight: 26)
-      .background(background, in: Capsule())
-      .opacity(isEnabled ? 1 : 0.4)
-      .contentShape(Capsule())
-      .onHover { isHovering = $0 }
-  }
-
-  private var background: Color {
-    if isActive { return theme.accent.accent.color.opacity(configuration.isPressed ? 0.24 : 0.16) }
-    if configuration.isPressed { return theme.surface.pressed.color }
-    return isHovering ? theme.surface.selected.color : theme.surface.hover.color
-  }
-}
-
 // MARK: - Filter
 
 /// The Filter capsule: tinted while any filter applies or the Filters sidebar is open, with the
@@ -95,7 +63,8 @@ private struct FilterButton: View {
         if count > 0 { CountBadge(count: count, style: .attention) }
       }
     }
-    .buttonStyle(HeaderCapsuleStyle(tier: tier, isActive: count > 0 || shell.areFiltersShown))
+    .buttonStyle(.panelCapsule(
+        isActive: count > 0 || shell.areFiltersShown, horizontalPadding: tier.capsulePadding))
     .help(shell.areFiltersShown ? L("Hide filters") : L("Show filters"))
     .accessibilityLabel(Text("Filter"))
     .accessibilityValue(Text(verbatim: model.filterButtonValue))
@@ -134,7 +103,7 @@ private struct SortControls: View {
       }
       .menuStyle(.button)
       .menuIndicator(.hidden)
-      .buttonStyle(HeaderCapsuleStyle(tier: tier))
+      .buttonStyle(.panelCapsule(horizontalPadding: tier.capsulePadding))
       .fixedSize()
       .help(L("Sort wallpapers"))
       .accessibilityLabel(Text("Sort wallpapers"))
@@ -149,7 +118,7 @@ private struct SortControls: View {
             .font(.system(size: 11.5, weight: .semibold))
             .frame(width: 14)
         }
-        .buttonStyle(HeaderCapsuleStyle(tier: tier))
+        .buttonStyle(.panelCapsule(horizontalPadding: tier.capsulePadding))
         .help(directionHelp(model))
         .accessibilityLabel(Text(verbatim: directionHelp(model)))
         .accessibilityIdentifier("installed-sort-direction")
@@ -215,12 +184,13 @@ private struct SelectButton: View {
         }
       }
     }
-    .buttonStyle(HeaderCapsuleStyle(tier: tier, isActive: model.isSelecting))
+    .buttonStyle(.panelCapsule(
+        isActive: model.isSelecting, horizontalPadding: tier.capsulePadding))
     .help(
       model.isSelecting
         ? L("Leave selection mode")
         : L(
-          "Select wallpapers to move to Trash. Holding a tile and dragging across others selects them too."
+          "Select wallpapers to add to a playlist or a collection, or to move to Trash. Holding a tile and dragging across others selects them too."
         )
     )
     .accessibilityLabel(model.isSelecting ? Text("Done") : Text("Select"))
@@ -235,16 +205,25 @@ private struct RefreshButton: View {
   @Environment(PanelController.self) private var controller
 
   var body: some View {
+    // The rescan can take a while on a large library: the button shows it is running, and the bar
+    // under the grid says what it found (`InstalledBrowserModel.refreshLibrary`).
+    let isRefreshing = controller.isBusy(PanelActionCoordinator.key("refresh"))
     Button {
       controller.library.refreshLibrary()
     } label: {
-      Image(systemName: "arrow.clockwise")
-        .font(.system(size: 11.5, weight: .semibold))
-        .frame(width: 14)
+      Group {
+        if isRefreshing {
+          ProgressRing(value: nil, lineWidth: 1.75).frame(width: 12, height: 12)
+        } else {
+          Image(systemName: "arrow.clockwise")
+            .font(.system(size: 11.5, weight: .semibold))
+        }
+      }
+      .frame(width: 14)
     }
-    .buttonStyle(HeaderCapsuleStyle(tier: tier))
-    .disabled(controller.isLibraryLoading)
-    .help(L("Refresh library"))
+    .buttonStyle(.panelCapsule(horizontalPadding: tier.capsulePadding))
+    .disabled(controller.isLibraryLoading || isRefreshing)
+    .help(isRefreshing ? L("Refreshing your library…") : L("Refresh library"))
     .accessibilityLabel(Text("Refresh library"))
     .accessibilityIdentifier("installed-refresh")
   }
@@ -267,7 +246,8 @@ private struct ImportButton: View {
         if tier.showsLabels { Text("Import") }
       }
     }
-    .buttonStyle(HeaderCapsuleStyle(tier: tier, isActive: model.importAnchor == .page))
+    .buttonStyle(.panelCapsule(
+        isActive: model.importAnchor == .page, horizontalPadding: tier.capsulePadding))
     .disabled(controller.importState.isBusy)
     .popover(
       isPresented: Binding(
@@ -275,7 +255,7 @@ private struct ImportButton: View {
         set: { if !$0 { model.closeImport() } }),
       arrowEdge: .bottom
     ) {
-      ImportPopover()
+      ImportPopover().panelPresentationLocale()
     }
     .help(L("Import wallpapers"))
     .accessibilityLabel(Text("Import"))

@@ -22,11 +22,6 @@ enum InspectorPolicy {
     canRun(kind) && target?.isSelectable == true
   }
 
-  /// Applying what the target display already shows does nothing, so that button restarts it.
-  static func reapplies(_ wallpaperID: String, target: TargetDisplayOption?) -> Bool {
-    target?.wallpaperID == wallpaperID
-  }
-
   /// One step for every display, offered only where there is more than one to put it on. A mirror
   /// follows its source and a disabled display shows nothing, so neither counts.
   static func offersApplyToAll(_ row: LibraryRow, sharedDisplayCount: Int) -> Bool {
@@ -82,7 +77,8 @@ enum InspectorPolicy {
   /// The problem report the inspector offers for an installed wallpaper.
   enum IssueReport: Equatable {
     /// None: nothing failed, and the wallpaper's type cannot run on macOS, which its own sentence
-    /// already says.
+    /// already says; or it is a scene waiting for the shared resources, whose notice offers the
+    /// fix instead.
     case none
     /// **Not working? Report on GitHub** under the type sentence, and the menu's report.
     case plain
@@ -92,8 +88,13 @@ enum InspectorPolicy {
   }
 
   /// The page's `failureReport` and `report`: a failure always comes with its report; otherwise
-  /// only a wallpaper that can run gets the plain one.
-  static func issueReport(for row: LibraryRow, failure: String?) -> IssueReport {
+  /// only a wallpaper that can run gets the plain one. A scene that cannot play because the shared
+  /// scene resources are missing gets none, whatever failed: that is setup for the user to do, not
+  /// a problem to report, and a report link beside it is read as the way out.
+  static func issueReport(
+    for row: LibraryRow, failure: String?, sceneResourcesMissing: Bool
+  ) -> IssueReport {
+    if sceneResourcesMissing, row.kind == .scene { return .none }
     if let failure { return .failure(failure) }
     return canRun(row.kind) ? .plain : .none
   }
@@ -132,22 +133,59 @@ enum InspectorPolicy {
     }
   }
 
-  // MARK: Position
+  // MARK: Frame rate
 
-  /// What the note under a display's Position sliders says.
-  enum PositionNote: Equatable {
-    /// The native video player draws the wallpaper on this display and keeps it centred, with
-    /// **Open Performance** to choose Compatibility instead. The sliders stay: the position is kept
-    /// for when another player draws it.
-    case nativePlayer
-    /// What the sliders do.
-    case explains
+  /// Whether a display's Frame rate row, and the note about the ceiling on it, are shown. The
+  /// native video player plays a clip at the clip's own rate, so neither the display's frame rate
+  /// nor a limit on it applies to what it draws; the row comes back for any other player, which
+  /// the scene engine's own drawing of a clip is.
+  static func offersFrameRate(for display: InspectorOptions.DisplayRow) -> Bool {
+    !display.isDrawnByNativePlayer
   }
 
-  /// Only the display the native player draws on gets its note; another display of the same
-  /// wallpaper is moved as usual.
-  static func positionNote(for display: InspectorOptions.DisplayRow) -> PositionNote {
-    display.isDrawnByNativePlayer ? .nativePlayer : .explains
+  // MARK: Fit with blurred backdrop
+
+  /// Fit with blurred backdrop is offered where the scaling mode moves a picture: scene and video wallpapers. A
+  /// web page always fills its window. A display already set to it keeps it in the menu.
+  static func offersBlurredFit(_ options: InspectorOptions, display: InspectorOptions.DisplayRow)
+    -> Bool
+  {
+    options.offersPosition || display.scalingMode == .matchBlurred
+  }
+
+  /// What is said under Fit with blurred backdrop.
+  enum BlurredFitNote: Equatable {
+    /// The native video player draws this display and has no blurred fill: its bars stay black,
+    /// with **Open Performance** to choose Compatibility instead.
+    case nativePlayer
+    /// Nothing: the blurred fill is drawn, or the mode is another one.
+    case none
+  }
+
+  static func blurredFitNote(for display: InspectorOptions.DisplayRow) -> BlurredFitNote {
+    display.scalingMode == .matchBlurred && display.isDrawnByNativePlayer ? .nativePlayer : .none
+  }
+
+  // MARK: Apply changes
+
+  /// The footer with Revert and Apply changes is drawn only while something waits to be applied:
+  /// an edit the bridge holds (a property, a Wallpaper Engine option, a display's scale factor or
+  /// its Enabled switch), text typed but not sent, or a value on its way. Revert and Apply changes
+  /// have nothing to act on otherwise, and nil (the options still loading) has no footer either.
+  static func showsFooter(_ options: InspectorOptions?) -> Bool { options?.hasChanges == true }
+
+  /// Which of Apply wallpaper and Apply changes is the Installed inspector's accent action.
+  enum PrimaryAction: Equatable {
+    /// **Apply wallpaper** (or **Reapply wallpaper**) in the header: nothing waits to be applied.
+    case applyWallpaper
+    /// **Apply changes** in the footer, while edits wait; Apply wallpaper is then drawn plain.
+    case applyChanges
+  }
+
+  /// Apply changes takes the accent exactly while the footer is drawn, so the two are never the
+  /// accent at once. A notice's call to action and an open form's submit button keep their own.
+  static func primaryAction(_ options: InspectorOptions?) -> PrimaryAction {
+    showsFooter(options) ? .applyChanges : .applyWallpaper
   }
 
   // MARK: Sections
@@ -155,6 +193,28 @@ enum InspectorPolicy {
   /// Displays opens by itself once the wallpaper is on a display. The state is the person's from the
   /// first draw on, so a later change of the rows never opens or closes it.
   static func displaysOpenByDefault(_ options: InspectorOptions) -> Bool { !options.displays.isEmpty }
+
+  /// Beside another display, each display's card shows a one-line summary under its name
+  /// (`InspectorWording.displaySummary`) and starts collapsed: two open cards of a dozen controls
+  /// each push everything after them far down. One display has nothing to choose between.
+  static func summarizesDisplays(_ options: InspectorOptions) -> Bool { options.displays.count >= 2 }
+
+  /// A display's card starts open when it is the only one, or while one of its settings waits for
+  /// Apply changes, so a staged value is never hidden when the inspector opens. As for the sections,
+  /// the state is the person's from the first draw on, except that a value staged later (the Black
+  /// bars card stages a scale factor) opens the card again (`InspectorSection`'s `opensWhen`).
+  static func displayCardOpenByDefault(
+    _ options: InspectorOptions, display: InspectorOptions.DisplayRow
+  ) -> Bool {
+    !summarizesDisplays(options) || display.hasStagedChanges
+  }
+
+  /// Wallpaper Engine options opens when one of them differs from its default.
+  /// It opens too for one that waits for Apply changes, which an option restored to its default does.
+  static func engineOptionsOpenByDefault(_ options: InspectorOptions) -> Bool {
+    options.engineHiddenModified
+      || (options.engineOptions ?? []).contains { $0.row.isModified || $0.row.isStaged }
+  }
 
   /// Collections opens for a wallpaper that belongs to one.
   static func collectionsOpenByDefault(_ collections: [CollectionRow], wallpaperID: String) -> Bool {

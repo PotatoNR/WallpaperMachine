@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The ring a Workshop tile wears over its picture while the wallpaper is on its way: live
 /// progress, one click to cancel, a shield when Steam needs the person, a retry mark after a
-/// failure.
+/// failure. A ring whose click cancels swaps its centre for a cross while hovered or while its tile
+/// has keyboard focus, as pixiv's does.
 ///
 /// It draws a `TileDownloadState` and nothing else; the state says what the ring is, what it reads
 /// and what a click does, and the tile passes the action on. Only a ring that has something to show
@@ -17,6 +18,8 @@ struct WorkshopTileRing: View {
   @Environment(\.panelTheme) private var theme
   @Environment(\.panelIsVisible) private var panelIsVisible
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  /// The tile's keyboard focus: the grids are `TileGrid`s, whose focus is the tile cell.
+  @Environment(\.isFocused) private var isFocused
   @State private var isHovering = false
 
   /// The most the ring grows: bigger tiles do not need a bigger ring.
@@ -25,13 +28,13 @@ struct WorkshopTileRing: View {
   var body: some View {
     Button(action: action) {
       ZStack {
-        Circle().fill(.black.opacity(isHovering && interactive ? 0.62 : 0.5))
+        ArtworkDisc(isHighlighted: isHovering && interactive)
         ring
         centre
-        if state.showsCloseOnHover && isHovering {
-          Image(systemName: "xmark")
-            .font(.system(size: diameter * 0.26, weight: .bold))
-            .foregroundStyle(.white)
+        if showsClose {
+          Image(systemName: DownloadRowAction.cancel.systemImage)
+            .font(.panel(.proportional(to: diameter, ratio: 0.26, weight: .bold)))
+            .foregroundStyle(theme.surface.markGlyph.color)
             .transition(.opacity)
         }
       }
@@ -40,6 +43,9 @@ struct WorkshopTileRing: View {
     }
     .buttonStyle(.plain)
     .disabled(!state.isEnabled)
+    // The one control that fades less than `PanelTheme.disabledOpacity`: a ring that cannot be
+    // clicked yet (a retry waiting for SteamCMD's setup) sits on a dimmed picture, where it would
+    // all but vanish at 0.4, and it still has to say why the download stopped.
     .opacity(state.isEnabled ? 1 : 0.6)
     .onHover { isHovering = $0 }
     .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
@@ -50,6 +56,8 @@ struct WorkshopTileRing: View {
 
   private var interactive: Bool { state.isEnabled }
 
+  private var showsClose: Bool { state.showsClose(isHovering: isHovering, isFocused: isFocused) }
+
   /// The track and the value arc, over the backdrop.
   @ViewBuilder
   private var ring: some View {
@@ -57,12 +65,12 @@ struct WorkshopTileRing: View {
     switch state.kind {
     case .progress:
       ProgressRing(value: state.progress, lineWidth: width)
-        .foregroundStyle(.white)
+        .foregroundStyle(theme.surface.markGlyph.color)
         .tint(accent)
         .padding(diameter * 0.1)
     case .busy:
       ProgressRing(value: nil, lineWidth: width)
-        .foregroundStyle(.white)
+        .foregroundStyle(theme.surface.markGlyph.color)
         .tint(accent)
         .padding(diameter * 0.1)
     case .attention:
@@ -76,7 +84,7 @@ struct WorkshopTileRing: View {
         .padding(diameter * 0.1)
     case .queued:
       Circle()
-        .strokeBorder(.white.opacity(0.28), lineWidth: width)
+        .strokeBorder(theme.surface.markGlyph.color.opacity(0.28), lineWidth: width)
         .padding(diameter * 0.1)
     }
   }
@@ -84,15 +92,17 @@ struct WorkshopTileRing: View {
   /// What sits inside: the percentage or the step word, with the speed under it, or a glyph.
   @ViewBuilder
   private var centre: some View {
-    let hidden = state.showsCloseOnHover && isHovering
+    // The same rule as the close mark, so the two never draw over each other.
+    let hidden = showsClose
     Group {
       if !state.text.isEmpty || !state.speed.isEmpty {
         VStack(spacing: 0) {
           if !state.text.isEmpty {
             Text(verbatim: state.text)
               .font(
-                .system(
-                  size: diameter * (state.isStepWord ? 0.145 : 0.24), weight: .semibold,
+                .panel(
+                  .proportional(
+                    to: diameter, ratio: state.isStepWord ? 0.145 : 0.24, weight: .semibold),
                   design: .rounded
                 ).monospacedDigit()
               )
@@ -101,7 +111,7 @@ struct WorkshopTileRing: View {
           }
           if !state.speed.isEmpty {
             Text(verbatim: state.speed)
-              .font(.system(size: max(7.5, diameter * 0.115)).monospacedDigit())
+              .font(.panel(.proportional(to: diameter, ratio: 0.115, minimum: 7.5)).monospacedDigit())
               .opacity(0.8)
               .lineLimit(1)
               .minimumScaleFactor(0.6)
@@ -109,25 +119,15 @@ struct WorkshopTileRing: View {
         }
         .padding(.horizontal, diameter * 0.16)
       } else if let glyph = state.glyph {
-        Image(systemName: Self.symbol(for: glyph))
-          .font(.system(size: diameter * 0.3, weight: .semibold))
+        Image(systemName: glyph.systemImage)
+          .font(.panel(.proportional(to: diameter, ratio: 0.3, weight: .semibold)))
       }
     }
-    .foregroundStyle(.white)
+    .foregroundStyle(theme.surface.markGlyph.color)
     .opacity(hidden ? 0 : 1)
   }
 
   private var accent: Color { theme.accent.accent.color }
-
-  /// The SF Symbol of a glyph in the middle of the ring.
-  static func symbol(for glyph: TileDownloadState.Glyph) -> String {
-    switch glyph {
-    case .play: "play.fill"
-    case .shield: "exclamationmark.shield.fill"
-    case .download: "arrow.down"
-    case .refresh: "arrow.clockwise"
-    }
-  }
 
   /// A soft pulse around a ring that waits for the person. It draws frames only while it is active
   /// and stops entirely otherwise.

@@ -21,6 +21,8 @@ struct AccessibilityElement {
   var identifier: String { string("accessibilityIdentifier") }
   /// What it says: its label, or, for a text, its value.
   var text: String { label.isEmpty ? value : label }
+  /// Where it is on the screen, in AppKit's coordinates (y grows upwards); zero without a frame.
+  var frame: CGRect { (attribute("accessibilityFrame") as? NSValue)?.rectValue ?? .zero }
 
   var children: [AccessibilityElement] {
     ((attribute("accessibilityChildren") as? [Any]) ?? []).compactMap {
@@ -69,6 +71,24 @@ struct AccessibilityElement {
     return found
   }
 
+  /// The system's own progress indicators drawn under `view`, found as AppKit views or as
+  /// accessibility elements, each named by its class or role. They spin on in a hidden window and
+  /// with Reduce Motion; the panel's `ProgressRing` and its `ProgressBar` without an amount stop
+  /// then and carry neither role, so they are never among them.
+  static func systemProgressIndicators(in view: NSView) -> [String] {
+    var found: [String] = []
+    func walk(_ view: NSView) {
+      if view is NSProgressIndicator, !view.isHidden { found.append(String(describing: type(of: view))) }
+      view.subviews.forEach(walk)
+    }
+    walk(view)
+    let roles: Set<String> = [
+      NSAccessibility.Role.progressIndicator.rawValue, NSAccessibility.Role.busyIndicator.rawValue,
+    ]
+    found += everything(in: view).map(\.role).filter(roles.contains)
+    return found
+  }
+
   private func attribute(_ key: String) -> Any? {
     guard object.responds(to: NSSelectorFromString(key)) else { return nil }
     return object.value(forKey: key)
@@ -86,9 +106,10 @@ struct AccessibilityElement {
 
 /// Makes the test host look, to SwiftUI, like an app an accessibility client is talking to.
 ///
-/// On macOS 26 SwiftUI builds no accessibility elements for hosted content until a client such as
-/// VoiceOver has asked the app something; macOS 27 builds them regardless. The render tests read
-/// that tree, so on a Mac with no client running (a hosted CI runner) every page looked empty.
+/// SwiftUI may build no accessibility elements for hosted content until a client such as VoiceOver
+/// has asked the app something: macOS 26 never does, and macOS 27 not always (a test run alone on
+/// 27.0.1 found an empty tree). The render tests read that tree, so on a Mac with no client running
+/// (a hosted CI runner) every page looked empty; every test that reads it connects first.
 /// One request to this app's own element, sent the way a client sends it, is enough; it is made
 /// off the main thread because the app answers it there.
 enum AccessibilityClient {

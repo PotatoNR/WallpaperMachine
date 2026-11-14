@@ -2,7 +2,9 @@ import AppKit
 import Darwin
 
 struct LockScreenWallpaperFailure: LocalizedError {
-  enum Reason { case general, differentExtensionCopy, extensionTurnedOff }
+  /// `transient` is a failure a later attempt can get past on its own: a write that raced
+  /// WallpaperAgent's own, or the agent between a restart and its relaunch.
+  enum Reason { case general, differentExtensionCopy, extensionTurnedOff, transient }
   let message: String
   var reason: Reason = .general
   var errorDescription: String? { message }
@@ -37,45 +39,66 @@ final class LockScreenWallpaperSelection {
     var store: [Int]
   }
 
-  private static var lastReloadSignal: Date?
   private static let globalPath = ["AllSpacesAndDisplays"]
 
   private let storeURL: URL
   private let journalURL: URL
-  private let reload: @MainActor () throws -> Void
+  private let reload: @MainActor () async throws -> Void
+  private let coordinator: SystemWallpaperStore?
   private let persistJournal: @MainActor (URL, Data?) throws -> Void
+  private let persistArchive: @MainActor (URL, Data?) throws -> Void
   private var entries: [Entry] = []
   private var hasPersistedJournal = false
+  private var readoptionNeedsPersistence = false
   private var restartPending = false
   private var settled: Settled?
 
-  convenience init(folder: URL) {
+  convenience init(folder: URL, coordinator: SystemWallpaperStore? = nil) {
+    let coordinator = coordinator ?? .shared
     self.init(
       storeURL: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
         "Library/Application Support/com.apple.wallpaper/Store/Index.plist"),
       journalURL: folder.appendingPathComponent("native-selection.plist"),
-      reload: { try Self.reloadWallpaperAgent() })
+      reload: { try await coordinator.reload() }, coordinator: coordinator)
   }
 
   init(
-    storeURL: URL, journalURL: URL, reload: @escaping @MainActor () throws -> Void,
+    storeURL: URL, journalURL: URL, reload: @escaping @MainActor () async throws -> Void,
+    coordinator: SystemWallpaperStore? = nil,
     persistJournal: @escaping @MainActor (URL, Data?) throws -> Void =
+      LockScreenWallpaperSelection.persistJournalFile,
+    persistArchive: @escaping @MainActor (URL, Data?) throws -> Void =
       LockScreenWallpaperSelection.persistJournalFile
   ) {
     self.storeURL = storeURL
     self.journalURL = journalURL
     self.reload = reload
+    self.coordinator = coordinator
     self.persistJournal = persistJournal
+    self.persistArchive = persistArchive
   }
 
-  func recover() throws {
+  func recover() async throws {
+    if let coordinator {
+      try await coordinator.transaction { try await self.recoverSelection() }
+    } else {
+      try await recoverSelection()
+    }
+  }
+
+  private func recoverSelection() async throws {
     guard FileManager.default.fileExists(atPath: journalURL.path) else { return }
     let recovered = try PropertyListDecoder().decode([Entry].self, from: Data(contentsOf: journalURL))
+    guard Set(recovered.map(\.path)).count == recovered.count else {
+      throw LockScreenWallpaperFailure(
+        message: String(localized: "The native wallpaper restoration journal is invalid."))
+    }
     entries = recovered
+    readoptionNeedsPersistence = false
     hasPersistedJournal = true
     // A crash may occur after the store write but before its service reload.
     restartPending = true
-    try synchronize(desktopDisplays: [], screenSaverDisplays: [])
+    try await synchronizeSelection(desktopDisplays: [], screenSaverDisplays: [])
   }
 
   func checkCompatibility() throws {
@@ -94,7 +117,22 @@ final class LockScreenWallpaperSelection {
 
   func synchronize(
     desktopDisplays: Set<String>, screenSaverDisplays: Set<String>, revision: String? = nil
-  ) throws {
+  ) async throws {
+    if let coordinator {
+      try await coordinator.transaction {
+        try await self.synchronizeSelection(
+          desktopDisplays: desktopDisplays, screenSaverDisplays: screenSaverDisplays, revision: revision)
+      }
+    } else {
+      try await synchronizeSelection(
+        desktopDisplays: desktopDisplays, screenSaverDisplays: screenSaverDisplays, revision: revision)
+    }
+  }
+
+  private func synchronizeSelection(
+    desktopDisplays: Set<String>, screenSaverDisplays: Set<String>, revision: String? = nil
+  ) async throws {
+    try Task.checkCancellation()
     let displays = desktopDisplays.union(screenSaverDisplays)
     if displays.isEmpty && entries.isEmpty && !restartPending { return }
     // With the same request and journal, only the store can change the outcome, and
@@ -107,6 +145,7 @@ final class LockScreenWallpaperSelection {
     }
     if !restartPending, let request, request == settled { return }
     settled = nil
+    let priorEntries = entries
     let bytes = try Data(contentsOf: storeURL)
     guard
       var root = try PropertyListSerialization.propertyList(from: bytes, format: nil)
@@ -117,22 +156,35 @@ final class LockScreenWallpaperSelection {
         message:
           String(localized: "This macOS wallpaper store format is unsupported. Native selection was not changed."))
     }
-    var paths = displays.sorted().map { ["Displays", $0] }
+    let sortedDisplays = displays.sorted()
+    var paths = sortedDisplays.map { ["Displays", $0] }
     let spaces = root["Spaces"] as? [String: Any] ?? [:]
+    // Stored back converted: each node lookup would otherwise convert every Space again.
+    root["Spaces"] = spaces
+    // Keep only paths still represented by this store or its live recovery journal.
+    let livePaths = Set(entries.map(\.path))
+    let archived = readArchivedEntries().filter {
+      $0.path == Self.globalPath || livePaths.contains($0.path) || Self.node(root, path: $0.path) != nil
+    }
+    entries = try readoptedEntries(root, archived: archived)
+    if entries != priorEntries { readoptionNeedsPersistence = true }
+    let entryPaths = Set(entries.map(\.path))
     for (space, value) in spaces.sorted(by: { $0.key < $1.key }) {
       guard let node = value as? [String: Any], node["Displays"] is [String: Any] else {
         throw LockScreenWallpaperFailure(
           message: String(localized: "This macOS Space has an unsupported wallpaper configuration."))
       }
-      paths += displays.sorted().map { ["Spaces", space, "Displays", $0] }
+      paths += sortedDisplays.map { ["Spaces", space, "Displays", $0] }
     }
     let fallbackPaths = [["SystemDefault"]] + spaces.keys.sorted().map { ["Spaces", $0, "Default"] }
+    let desiredPaths = Set(paths)
+    let desiredFallbackPaths = Set(fallbackPaths)
     let activeFields = Set(
       (desktopDisplays.isEmpty ? [] : ["Desktop"])
         + (screenSaverDisplays.isEmpty ? [] : ["Idle"]))
     func desiredFields(_ path: [String], observeOnly: Bool) -> Set<String> {
-      if observeOnly { return fallbackPaths.contains(path) ? activeFields : [] }
-      guard paths.contains(path), let display = path.last else { return [] }
+      if observeOnly { return desiredFallbackPaths.contains(path) ? activeFields : [] }
+      guard desiredPaths.contains(path), let display = path.last else { return [] }
       return Set(
         (desktopDisplays.contains(display) ? ["Desktop"] : [])
           + (screenSaverDisplays.contains(display) ? ["Idle"] : []))
@@ -152,13 +204,15 @@ final class LockScreenWallpaperSelection {
     }
     let journaledOriginal = { (path: [String]) in originals[path] }
     var recovery = entries
+    var recoveryIndices = Dictionary(
+      uniqueKeysWithValues: recovery.enumerated().map { ($0.element.path, $0.offset) })
     var retained: [Entry] = []
     var changed = false
     let selection = try Self.selection(revision: revision)
     // The pre-commit journal owns the union of old and new fields. A crash at
     // either side of the atomic store write can therefore restore all of them.
     func record(_ entry: Entry, original: [String: Any]) throws {
-      if let index = recovery.firstIndex(where: { $0.path == entry.path }) {
+      if let index = recoveryIndices[entry.path] {
         var merged = originals[entry.path] ?? [:]
         if entry.path == Self.globalPath {
           merged = original
@@ -172,6 +226,7 @@ final class LockScreenWallpaperSelection {
         recovery[index].fields = recovery[index].ownedFields.union(entry.ownedFields).sorted()
         originals[entry.path] = merged
       } else {
+        recoveryIndices[entry.path] = recovery.count
         recovery.append(entry)
         originals[entry.path] = original
       }
@@ -411,7 +466,7 @@ final class LockScreenWallpaperSelection {
           (["Spaces", space, "Displays", $0.path[1]],
             $0.ownedFields.subtracting(desiredFields($0.path, observeOnly: false)))
         }
-      for (path, fields) in discovered where !entries.contains(where: { $0.path == path }) {
+      for (path, fields) in discovered where !entryPaths.contains(path) {
         guard var node = Self.node(root, path: path) else { continue }
         let copied = fields.filter { Self.owns(node[$0]) }
         guard !copied.isEmpty else { continue }
@@ -428,35 +483,51 @@ final class LockScreenWallpaperSelection {
       }
     }
     for path in fallbackPaths
-    where !activeFields.isEmpty && !entries.contains(where: { $0.path == path }) {
+    where !activeFields.isEmpty && !entryPaths.contains(path) {
       try reconcile(nil, path: path, observeOnly: true)
     }
-    for path in paths where !entries.contains(where: { $0.path == path }) {
+    for path in paths where !entryPaths.contains(path) {
       try reconcile(nil, path: path, observeOnly: false)
     }
     if changed {
       try persistEntries(recovery)
       guard try Data(contentsOf: storeURL) == bytes else {
+        // Nothing was written. The union stays on disk for recovery, but the next attempt must
+        // not count the fields this one was about to take as ours: it would read them as
+        // changed outside the app.
+        entries = priorEntries
         throw LockScreenWallpaperFailure(
           message:
-            String(localized: "The system wallpaper changed during native selection. Please retry; no concurrent changes were overwritten."))
+            String(localized: "The system wallpaper changed during native selection. Please retry; no concurrent changes were overwritten."),
+          reason: .transient)
       }
-      try Self.encode(root).write(to: storeURL, options: .atomic)
+      if let coordinator {
+        try coordinator.replace(Self.encode(root), expected: bytes)
+      } else {
+        try Self.encode(root).write(to: storeURL, options: .atomic)
+      }
       restartPending = true
     }
     if restartPending {
-      try reload()
+      try await reload()
       restartPending = false
     }
     let unchanged = !changed && retained == entries
+    // Save relinquished fields before pruning the write-ahead journal. A failed archive
+    // write leaves that journal intact; a failed prune leaves both copies recoverable.
+    try archiveRemovedEntries(retained, archived: archived)
     try persistEntries(retained)
     if unchanged { settled = request }
   }
 
   private func persistEntries(_ next: [Entry]) throws {
-    guard next != entries || hasPersistedJournal != !next.isEmpty else { return }
+    // Adoption changes memory before the union is saved. Keep it pending across a failed
+    // write so a retry cannot mistake those fields for an already-persisted journal.
+    guard readoptionNeedsPersistence || next != entries || hasPersistedJournal != !next.isEmpty
+    else { return }
     let data = try (next.isEmpty ? nil : PropertyListEncoder().encode(next))
     try persistJournal(journalURL, data)
+    readoptionNeedsPersistence = false
     entries = next
     hasPersistedJournal = !next.isEmpty
   }
@@ -469,6 +540,102 @@ final class LockScreenWallpaperSelection {
     } else if FileManager.default.fileExists(atPath: url.path) {
       try FileManager.default.removeItem(at: url)
     }
+  }
+
+  /// A pruned journal, kept for `readoptedEntries`.
+  private static func restoredJournalURL(_ journal: URL) -> URL {
+    journal.deletingLastPathComponent().appendingPathComponent("restored-" + journal.lastPathComponent)
+  }
+
+  private func readArchivedEntries() -> [Entry] {
+    guard let data = try? Data(contentsOf: Self.restoredJournalURL(journalURL)),
+      let archived = try? PropertyListDecoder().decode([Entry].self, from: data)
+    else { return [] }
+    // A malformed archive is optional recovery evidence, never a reason to trap.
+    guard Set(archived.map(\.path)).count == archived.count else { return [] }
+    return archived
+  }
+
+  private func archiveRemovedEntries(_ next: [Entry], archived: [Entry]) throws {
+    let nextFields = Dictionary(uniqueKeysWithValues: next.map { ($0.path, $0.ownedFields) })
+    var saved = Dictionary(uniqueKeysWithValues: archived.map { ($0.path, $0) })
+    var removed = false
+    for entry in entries {
+      let fields = entry.ownedFields.subtracting(nextFields[entry.path] ?? [])
+      guard !fields.isEmpty else { continue }
+      removed = true
+      var released = entry
+      released.fields = fields.sorted()
+      saved[entry.path] = try Self.merging(saved[entry.path], into: released)
+    }
+    guard removed else { return }
+    let combined = saved.values.sorted { $0.path.lexicographicallyPrecedes($1.path) }
+    try persistArchive(Self.restoredJournalURL(journalURL), PropertyListEncoder().encode(combined))
+  }
+
+  /// Global entries retain a complete baseline; display entries retain only owned fields.
+  /// Keep the newer baseline and metadata, filling only missing display ownership.
+  private static func merging(_ older: Entry?, into newer: Entry) throws -> Entry {
+    guard let older else { return newer }
+    let extra = older.ownedFields.subtracting(newer.ownedFields)
+    guard !extra.isEmpty else { return newer }
+    var result = newer
+    result.fields = newer.ownedFields.union(extra).sorted()
+    // An unowned global choice (even an absent one) is newer recovery evidence too.
+    if newer.path == globalPath { return result }
+    guard let previous = try PropertyListSerialization.propertyList(from: older.original, format: nil)
+      as? [String: Any],
+      let latest = try PropertyListSerialization.propertyList(from: newer.original, format: nil)
+        as? [String: Any]
+    else {
+      throw LockScreenWallpaperFailure(
+        message: String(localized: "The native wallpaper restoration journal is invalid."))
+    }
+    var original = latest
+    for key in extra { original[key] = previous[key] }
+    result.original = try encode(original)
+    return result
+  }
+
+  /// WallpaperAgent may write an old snapshot over either a partial or complete restore.
+  /// Recover each app-written field independently; active originals and manual choices win.
+  private func readoptedEntries(_ root: [String: Any], archived: [Entry]) throws -> [Entry] {
+    var recovered = Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0) })
+    var takenFields: Set<String> = []
+    for entry in archived where entry.path != Self.globalPath {
+      guard let node = Self.node(root, path: entry.path) else { continue }
+      let active = recovered[entry.path]?.ownedFields ?? []
+      let fields = entry.ownedFields.subtracting(active).filter {
+        Self.ownsRevisionedSelection(node[$0])
+      }
+      guard !fields.isEmpty else { continue }
+      var taken = entry
+      taken.fields = fields.sorted()
+      takenFields.formUnion(fields)
+      if let current = recovered[entry.path] {
+        recovered[entry.path] = try Self.merging(taken, into: current)
+      } else {
+        recovered[entry.path] = taken
+      }
+    }
+    if var entry = archived.first(where: { $0.path == Self.globalPath }), !takenFields.isEmpty {
+      let global = Self.separatedLinked(Self.node(root, path: Self.globalPath) ?? [:])
+      let active = recovered[Self.globalPath]?.ownedFields ?? []
+      entry.fields = entry.ownedFields.intersection(takenFields).subtracting(active)
+        .filter { global[$0] == nil }.sorted()
+      if !entry.ownedFields.isEmpty {
+        if let current = recovered[Self.globalPath] {
+          recovered[Self.globalPath] = try Self.merging(entry, into: current)
+        } else {
+          recovered[Self.globalPath] = entry
+        }
+      }
+    }
+    // Keep the live journal's order so unchanged reconciliation remains a no-op.
+    let activePaths = Set(entries.map(\.path))
+    return entries.compactMap { recovered[$0.path] }
+      + recovered.values.filter { !activePaths.contains($0.path) }
+        .sorted { $0.path.lexicographicallyPrecedes($1.path) }
   }
 
   /// A fallback that macOS overwrote with a copy of this extension's selection
@@ -590,6 +757,17 @@ final class LockScreenWallpaperSelection {
     return choices[0]["Provider"] as? String == LockScreenConfiguration.extensionIdentifier
   }
 
+  /// Only the service writes revisioned selections; System Settings offers plain `current`.
+  private static func ownsRevisionedSelection(_ value: Any?) -> Bool {
+    guard owns(value), let selection = value as? [String: Any],
+      let content = selection["Content"] as? [String: Any],
+      let choices = content["Choices"] as? [[String: Any]],
+      let data = choices.first?["Configuration"] as? Data,
+      let configuration = String(data: data, encoding: .utf8)
+    else { return false }
+    return configuration.hasPrefix("current:") && configuration.count > "current:".count
+  }
+
   /// Swift dictionaries iterate in a per-instance order, so equal values can encode to
   /// different bytes. Compare decoded values, or keep bytes already journaled.
   private static func encode(_ value: Any) throws -> Data {
@@ -623,55 +801,9 @@ final class LockScreenWallpaperSelection {
       root[key] = value
       return
     }
-    var child = root[key] as? [String: Any] ?? [:]
+    var child = root.removeValue(forKey: key) as? [String: Any] ?? [:]
     setNode(&child, path: Array(path.dropFirst()), value: value)
     root[key] = child
   }
 
-  /// Verify effective UID and the kernel-reported executable immediately before
-  /// each signal. Never signal by name alone, restart Dock, or touch loginwindow.
-  private static func reloadWallpaperAgent() throws {
-    let expected = "/System/Library/CoreServices/WallpaperAgent.app/Contents/MacOS/WallpaperAgent"
-    let capacity = proc_listallpids(nil, 0)
-    guard capacity > 0 else {
-      throw LockScreenWallpaperFailure(message: String(localized: "Unable to enumerate the wallpaper service."))
-    }
-    var pids = [pid_t](repeating: 0, count: Int(capacity) + 32)
-    let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
-    guard count > 0, Int(count) <= pids.count else {
-      throw LockScreenWallpaperFailure(message: String(localized: "Unable to identify the wallpaper service safely."))
-    }
-    var found = false
-    // PROC_PIDPATHINFO_MAXSIZE expands to 4*MAXPATHLEN and is not Swift-importable.
-    var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-    for pid in pids.prefix(Int(count)) where pid > 0 {
-      var info = proc_bsdinfo()
-      let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-      guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
-        info.pbi_uid == getuid(), info.pbi_ruid == getuid()
-      else { continue }
-      let length = path.withUnsafeMutableBytes {
-        proc_pidpath(pid, $0.baseAddress, UInt32($0.count))
-      }
-      guard length > 0, String(cString: path) == expected else { continue }
-      guard kill(pid, SIGTERM) == 0 || errno == ESRCH else {
-        throw LockScreenWallpaperFailure(
-          message:
-            String(localized: "macOS refused to reload the user-owned wallpaper service (errno \(errno)). The restoration journal was retained.")
-        )
-      }
-      found = true
-    }
-    if found {
-      lastReloadSignal = Date()
-      return
-    }
-    // We SIGTERMed the agent moments ago and launchd has not relaunched it yet.
-    // The relaunch reads the store we just wrote, so no signal is needed.
-    if let last = lastReloadSignal, Date().timeIntervalSince(last) < 10 { return }
-    throw LockScreenWallpaperFailure(
-      message:
-        String(localized: "No positively verified user-owned WallpaperAgent is running. Native selection could not be activated; its restoration journal was retained.")
-    )
-  }
 }

@@ -12,11 +12,10 @@ struct DownloadRow: Identifiable, Equatable {
   }
 
   /// The job's id: a Workshop item's, `WorkshopStore.sceneAssetsRequestID` for the shared scene
-  /// assets, `WorkshopStore.signInRequestID` for a sign-in that downloads nothing, or the library
-  /// id a pixiv page is saved as.
+  /// assets, or the library id a pixiv page is saved as.
   let id: String
   let source: Source
-  /// The Workshop item or pixiv page this installs; nil for the shared assets and the sign-in.
+  /// The Workshop item or pixiv page this installs; nil for the shared assets.
   let wallpaperID: String?
   let title: String
   /// What the job says it is doing, in a full sentence.
@@ -30,8 +29,6 @@ struct DownloadRow: Identifiable, Equatable {
   let isQueued: Bool
   let isPaused: Bool
   let isCancelled: Bool
-  /// The sign-in that downloads nothing.
-  let isSignInOnly: Bool
   /// Signed in, but Steam has not asked for anything yet: the dialog must stay open through it.
   let isAuthenticating: Bool
   let bytesReceived: Int64?
@@ -45,6 +42,8 @@ struct DownloadRow: Identifiable, Equatable {
   let ownership: WorkshopDownloader.WallpaperEngineOwnership
   /// **Download and apply** is pending for this item.
   let appliesOnArrival: Bool
+  /// Runs on the QR sign-in, whose account is changed by logging out in Settings, not per job.
+  let signsInWithQRCode: Bool
 
   /// Holding a slot: transferring, signing in or installing.
   var isRunning: Bool { isPending && !isQueued }
@@ -59,8 +58,8 @@ struct DownloadRow: Identifiable, Equatable {
 
   // What the Downloads list offers for the row.
 
-  /// A job that is running or waiting can be paused, except the sign-in, which downloads nothing.
-  var canPause: Bool { isPending && !isPaused && !isSignInOnly }
+  /// A job that is running or waiting can be paused.
+  var canPause: Bool { isPending && !isPaused }
   /// Anything under way or paused can be cancelled; a waiting job is removed from the queue.
   var canCancel: Bool { isPending || isPaused }
   var canResume: Bool { isPaused && !isPending }
@@ -82,12 +81,12 @@ struct DownloadRow: Identifiable, Equatable {
     status: String = "", image: PanelImageSource? = nil, account: String = "",
     phase: WorkshopDownloader.Phase? = nil, progress: Double? = nil, isPending: Bool = false,
     isQueued: Bool = false, isPaused: Bool = false, isCancelled: Bool = false,
-    isSignInOnly: Bool = false, isAuthenticating: Bool = false, bytesReceived: Int64? = nil,
+    isAuthenticating: Bool = false, bytesReceived: Int64? = nil,
     bytesExpected: Int64? = nil, bytesPerSecond: Double? = nil, secondsRemaining: Int? = nil,
     errorMessage: String? = nil, prompt: WorkshopDownloader.Prompt? = nil,
     challenge: WorkshopDownloader.SteamGuardChallenge? = nil, warning: String? = nil,
     ownership: WorkshopDownloader.WallpaperEngineOwnership = .unknown,
-    appliesOnArrival: Bool = false
+    appliesOnArrival: Bool = false, signsInWithQRCode: Bool = false
   ) {
     self.id = id
     self.source = source
@@ -102,7 +101,6 @@ struct DownloadRow: Identifiable, Equatable {
     self.isQueued = isQueued
     self.isPaused = isPaused
     self.isCancelled = isCancelled
-    self.isSignInOnly = isSignInOnly
     self.isAuthenticating = isAuthenticating
     self.bytesReceived = bytesReceived
     self.bytesExpected = bytesExpected
@@ -114,6 +112,7 @@ struct DownloadRow: Identifiable, Equatable {
     self.warning = warning
     self.ownership = ownership
     self.appliesOnArrival = appliesOnArrival
+    self.signsInWithQRCode = signsInWithQRCode
   }
 
   /// How Steam's job reads.
@@ -122,16 +121,16 @@ struct DownloadRow: Identifiable, Equatable {
     let worker = job.worker
     self.init(
       id: job.id, wallpaperID: job.item?.id,
-      title: job.item?.title ?? WorkshopDownloadStage.itemlessTitle(id: job.id), status: job.status,
+      title: job.item?.title ?? WorkshopDownloadStage.itemlessTitle, status: job.status,
       image: job.item?.thumbnail, account: job.account, phase: job.phase, progress: job.progress,
       isPending: job.isPending, isQueued: job.isQueued, isPaused: job.isPaused,
-      isCancelled: job.isCancelled, isSignInOnly: job.isSignIn,
+      isCancelled: job.isCancelled,
       isAuthenticating: job.isPending && !job.isQueued && worker.isAuthenticating,
       bytesReceived: job.bytesReceived, bytesExpected: job.bytesExpected,
       bytesPerSecond: job.bytesPerSecond, secondsRemaining: job.secondsRemaining,
       errorMessage: job.errorMessage, prompt: worker.prompt, challenge: worker.steamGuardChallenge,
       warning: worker.sessionWarning, ownership: worker.wallpaperEngineOwnership,
-      appliesOnArrival: appliesOnArrival)
+      appliesOnArrival: appliesOnArrival, signsInWithQRCode: job.steamCMD == nil)
   }
 
   /// How a pixiv save reads in the shared queue.

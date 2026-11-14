@@ -57,11 +57,11 @@ final class DownloaderSessionTests: DownloaderTestCase {
     try await authenticate(first)
     try await assertImported(first, in: root, itemID: "123456")
 
-    let other = startDownload(in: root, username: "another_account", itemID: "234567")
+    let other = startDownload(in: root, username: "_another_account", itemID: "234567")
     try await authenticate(other)
     try await assertImported(other, in: root, itemID: "234567")
-    XCTAssertEqual(other.savedAccount, "another_account")
-    let restored = startDownload(in: root, username: "another_account", itemID: "345678")
+    XCTAssertEqual(other.savedAccount, "_another_account")
+    let restored = startDownload(in: root, username: "_another_account", itemID: "345678")
     try await assertImported(restored, in: root, itemID: "345678")
 
     let previous = startDownload(in: root, itemID: "456789")
@@ -283,5 +283,30 @@ final class DownloaderSessionTests: DownloaderTestCase {
       await downloader.shutdown()
       throw error
     }
+  }
+
+  // MARK: Account names
+
+  /// What counts as a Steam login name: an email address, which Steam once accepted and which
+  /// cannot be renamed, and a name that starts with an underscore; never `anonymous`, a profile
+  /// name with spaces, another script, or something SteamCMD would read as an option or a command.
+  func testAccountNamesAreSteamLoginNames() {
+    XCTAssertEqual(WorkshopDownloader.normalizedAccount(" Old.User-1@Example.com "), "old.user-1@example.com")
+    XCTAssertEqual(WorkshopDownloader.normalizedAccount(" _Underscore_User "), "_underscore_user")
+    XCTAssertEqual(WorkshopDownloader.normalizedAccount(" LocalTest "), "localtest")
+    for bad in ["", "  ", "anonymous", "Anonymous", "my name", "名前", "-login", "+quit", "@example.com", "a+b", "a;b"] {
+      XCTAssertNil(WorkshopDownloader.normalizedAccount(bad), bad)
+    }
+  }
+
+  /// A saved sign-in for a name that starts with an underscore survives relaunches and updates.
+  func testASavedSignInWhoseNameStartsWithAnUnderscoreIsReadBack() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "mwe-underscore-account-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+      at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try Data("_underscore_user".utf8).write(to: root.appendingPathComponent("account"))
+    XCTAssertEqual(WorkshopDownloader.readSavedAccount(at: root), "_underscore_user")
   }
 }

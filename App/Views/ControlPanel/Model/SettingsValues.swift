@@ -11,6 +11,10 @@ struct GeneralSettings: Equatable, Sendable {
   var launchAtLogin: LaunchAtLoginState
   /// Whether applying a wallpaper hides the app so the result is visible. Off until turned on.
   var hidesAfterActivating: Bool
+  /// Whether Library tiles play their animated preview only on hover. Off until turned on.
+  var playsLibraryPreviewsOnHover: Bool
+  /// Whether the menu bar icon carries what the app draws now. Off until turned on.
+  var showsEnergyInMenuBar: Bool
 }
 
 /// Launch at login as the Startup row shows it. The facts are the bridge's: whether the login item
@@ -55,6 +59,10 @@ struct DesktopSettings: Equatable, Sendable {
   var refreshesDesktopPicture: Bool
   /// The inverse of macOS's "Click wallpaper to reveal desktop".
   var keepsWindowsOnWallpaperClick: Bool
+  /// The inverse of Finder's own "show icons on the desktop", read from Finder each time.
+  var hidesDesktopIcons: Bool
+  /// A black strip behind the menu bar of displays with a camera notch. Off until turned on.
+  var hidesNotch: Bool
   /// The displays follow property edits before Apply.
   var livePropertyEdits: Bool
 
@@ -149,9 +157,15 @@ struct LockScreenState: Equatable, Sendable {
 /// reports "in effect now" beside the choices.
 struct PlaybackSettings: Equatable {
   var wallpapersMuted: Bool
+  /// Installed wallpapers muted in their own saved sound settings (the inspector's Mute this
+  /// wallpaper). Mute All is layered on top of them and never written into them.
+  var mutedWallpaperCount: Int = 0
   var desktopCoveredAction: DesktopCoveredAction
   var playsOnlyOnActiveDisplay: Bool
   var otherAudioAction: OtherAudioAction
+  /// The share of its own volume, in percent, each wallpaper keeps under Reduce volume.
+  var otherAudioVolume: Int = PlaybackPreferences.defaultOtherAudioVolume
+  var otherAppInFrontAction: OtherAppInFrontAction
   var displaySleepAction: DisplaySleepAction
   var batteryMode: BridgeBatteryMode
   var onBatteryPower: Bool
@@ -162,6 +176,9 @@ struct PlaybackSettings: Equatable {
   var lowBatteryThreshold: Int
   var lowPowerModeAction: SystemConditionAction
   var thermalAction: SystemConditionAction
+  /// What wallpapers do once the Mac has had no input for `inactivityMinutes`.
+  var inactivityAction: InactivityAction = .keepRunning
+  var inactivityMinutes: Int = PlaybackPreferences.defaultInactivityMinutes
   /// Nil on a Mac without an internal battery, which is how the low-battery rows are left out.
   var batteryPercent: Int?
   var lowPowerModeIsOn: Bool
@@ -181,6 +198,16 @@ struct PlaybackSettings: Equatable {
   var showsLowBatteryRows: Bool { hasBattery }
   /// The low battery level is asked only once the rule does something.
   var showsLowBatteryLevel: Bool { hasBattery && lowBatteryAction != .keepRunning }
+  /// The reduced volume is asked only once other-app sound or a covered desktop turns wallpapers
+  /// down. Both use the one level.
+  var showsOtherAudioVolume: Bool {
+    otherAudioAction == .reduceVolume || desktopCoveredAction == .reduceVolume
+  }
+  /// The level's row sits under the first row that chose Reduce volume: the covered desktop's,
+  /// unless only other-app sound did.
+  var reducedVolumeFollowsDesktopCovered: Bool { desktopCoveredAction == .reduceVolume }
+  /// So is the time without input after which the Mac counts as inactive.
+  var showsInactivityTime: Bool { inactivityAction != .keepRunning }
   /// "Only play on the display I'm using" needs two displays, or is shown while on so it can be turned off.
   var showsActiveDisplayOnly: Bool { enabledDisplayCount >= 2 || playsOnlyOnActiveDisplay }
   /// The quick On battery module is worth showing on a Mac with a battery, or while its choice is not the default.
@@ -202,6 +229,16 @@ struct PlaybackSettings: Equatable {
     conditionOverridingBatteryMode?.statusText ?? quality.onBatteryText
   }
 
+  /// The note of "When another app is in front" while Pause on battery is chosen: the sentence about
+  /// the battery leads, so the line under the title says what that choice does. Nil keeps the
+  /// declared note, which says the same after the others.
+  @MainActor var otherAppInFrontNote: String? {
+    guard otherAppInFrontAction == .pauseOnBattery else { return nil }
+    return L(
+      "Pause on battery applies only on battery: the wallpaper holds its last frame and plays again when you click the desktop or plug in your Mac. Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound."
+    )
+  }
+
   /// "Low Power Mode is on now.", and what its rule does while engaged.
   @MainActor var lowPowerModeNote: String {
     Self.note(
@@ -211,6 +248,14 @@ struct PlaybackSettings: Equatable {
 
   @MainActor var thermalNote: String {
     Self.note(thermalLevel.note(for: thermalAction), engaged: conditions.effect(of: .heat))
+  }
+
+  /// What counts as inactive, and what the rule does while the Mac is.
+  @MainActor var inactivityNote: String {
+    Self.note(
+      L(
+        "Inactive means no keyboard, mouse or trackpad input for the time you choose. Wallpapers resume at your next input."
+      ), engaged: conditions.effect(of: .inactivity))
   }
 
   /// "The battery is at 54% now." beside the low-battery choice, and what the rule does while
@@ -247,16 +292,15 @@ struct PerformanceSettings: Equatable {
   var slider: FrameRateCapSlider
   /// The preset the saved values match, nil for Custom.
   var activePreset: QualityPreset?
-  var videoBackend: VideoBackendMode
   var videoBackends: [VideoBackendReport]
-  var contentPacing: Bool
-  var sharedVideoDecode: Bool
-  var sharedDecode: SharedDecodeReport
-  var sceneRenderer: SceneRendererMode
   var sceneResolution: SceneResolutionMode
+  /// The saved scene quality; `sceneQualityInForce` is what the renderer draws.
+  var sceneQuality: BridgeSceneQuality
+  var sceneQualityInForce: [SceneQualityInForceReport]
   var sceneOptimization: Bool
   var sceneOnDemand: Bool
   var sceneVideoPlaneSampling: Bool
+  var sceneDisplayFraming: Bool
   var sceneUpdates: [SceneUpdateReport]
   var sceneRenderers: [SceneRendererReport]
 

@@ -50,7 +50,7 @@ final class FirstRunBridge: LayoutSnapshotBridge {
 }
 
 /// The first-run guide's state machine against the real stores: what applies at once, what is a
-/// draft, what Skip puts back, the Steam sign-in against a fake SteamCMD, and how the guide ends.
+/// draft, what Skip puts back, what Skip setup and Escape do, and how the guide ends.
 /// Replaces the model half of `testFirstRunGuideCoversTheWindowWalksSixPagesAndReturnsFromSettings`
 /// and the four `testWelcome*` suites.
 @MainActor
@@ -208,7 +208,7 @@ final class FirstRunModelTests: PanelTestCase {
       await model.skipLanguage()
       XCTAssertEqual(controller.themePreferences.mode, .system, "Skip puts the appearance back")
       XCTAssertEqual(model.languageChoice, AppLanguageStore.systemChoice, "and the language")
-      XCTAssertEqual(model.step, .steam)
+      XCTAssertEqual(model.step, .performance)
     }
   }
 
@@ -217,7 +217,7 @@ final class FirstRunModelTests: PanelTestCase {
       await model.chooseLanguage("ja")
       await model.chooseAppearance(.light)
       model.next()
-      XCTAssertEqual(model.step, .steam)
+      XCTAssertEqual(model.step, .performance)
       XCTAssertEqual(model.languageChoice, "ja")
       XCTAssertEqual(panel.controller.themePreferences.mode, .light)
 
@@ -227,7 +227,7 @@ final class FirstRunModelTests: PanelTestCase {
     }
   }
 
-  // MARK: Page 3
+  // MARK: Page 2
 
   /// A preset or the slider is a draft: nothing reaches the engine until Continue, which sends the
   /// limit and then the scale of what changed, and the slider replaces the preset's limit.
@@ -297,7 +297,7 @@ final class FirstRunModelTests: PanelTestCase {
     }
   }
 
-  // MARK: Page 4
+  // MARK: Page 3
 
   /// The drafted preferences are committed in the order they were chosen, and a refusal stops the
   /// commit with its reason: what went before is saved, what comes after stays a draft.
@@ -394,111 +394,97 @@ final class FirstRunModelTests: PanelTestCase {
     }
   }
 
-  // MARK: Steam: the form
+  // MARK: Skip setup
 
-  /// The form is checked before anything reaches Steam: a login name, then a password.
-  func testSignInIsRefusedBeforeAnythingIsSentWhenTheFormIsWrong() async throws {
-    try await withGuide { panel, model, _ in
-      try pinPanelLanguageToEnglish()
-      model.go(to: .steam)
-      model.signInAccount = "  "
-      let missingAccount = await model.submitSignIn(password: "secret")
-      XCTAssertEqual(missingAccount, .invalidAccount)
-      XCTAssertEqual(
-        model.error,
-        "Enter your Steam account name: the login name, not the profile name. Letters, numbers and underscores only.")
+  /// Skip setup ends the guide from every page but the last, as Start using the app does: what was
+  /// applied at once stays, nothing is committed, and only a first run writes the flag. On the last
+  /// page it is not offered and does nothing.
+  func testSkipSetupEndsTheGuideFromEveryPageButTheLastAndKeepsWhatApplied() async throws {
+    try await withGuide { panel, model, bridge in
+      let controller = panel.controller
+      await model.chooseAppearance(.dark)
+      XCTAssertTrue(model.offersSkipSetup)
+      model.skipSetup()
+      XCTAssertTrue(controller.welcomeSeen, "A first run's flag is set")
+      XCTAssertTrue(PanelPreferences.welcomeSeen(in: panel.defaults))
+      XCTAssertFalse(controller.shell.isWelcomeOpen)
+      XCTAssertFalse(model.isOpen)
+      XCTAssertEqual(controller.themePreferences.mode, .dark, "What applied at once stays")
 
-      for bad in ["anonymous", "Anonymous", "my name", "名前", "a-b"] {
-        model.signInAccount = bad
-        let result = await model.submitSignIn(password: "secret")
-        XCTAssertEqual(result, .invalidAccount, bad)
+      // The key is gone: a replay that wrote the flag would bring it back.
+      panel.defaults.removeObject(forKey: PanelPreferences.welcomeSeenKey)
+      for step in WelcomeStep.allCases where !step.isLast {
+        controller.shell.isWelcomeRequested = true
+        model.open()
+        model.go(to: step)
+        XCTAssertTrue(model.offersSkipSetup, "\(step)")
+        model.skipSetup()
+        XCTAssertFalse(controller.shell.isWelcomeOpen, "\(step)")
+        XCTAssertFalse(model.isOpen, "\(step)")
       }
+      XCTAssertNil(panel.defaults.object(forKey: PanelPreferences.welcomeSeenKey), "Replays leave the flag alone")
+      XCTAssertEqual(controller.themePreferences.mode, .dark)
+      XCTAssertTrue(bridge.committed.isEmpty, "Skipping commits nothing")
 
-      model.signInAccount = " LocalTest "
-      let noPassword = await model.submitSignIn(password: "")
-      XCTAssertEqual(noPassword, .missingPassword)
-      XCTAssertEqual(model.error, "Enter your Steam password.")
-      XCTAssertEqual(model.signInAccount, "LocalTest", "The account is trimmed, the password is not")
-      XCTAssertNil(model.signInRequest)
-      XCTAssertNil(model.signInJob)
-      XCTAssertTrue(panel.workshop.downloadRequests.isEmpty)
-      XCTAssertFalse(model.holdsSecret)
+      controller.shell.isWelcomeRequested = true
+      model.open()
+      model.go(to: .start)
+      XCTAssertFalse(model.offersSkipSetup, "Start using the app ends the guide there")
+      model.skipSetup()
+      XCTAssertTrue(controller.shell.isWelcomeOpen, "Skip setup does nothing on the last page")
+      XCTAssertEqual(model.step, .start)
     }
   }
 
-  func testThePasswordIsNotTrimmed() {
-    XCTAssertNil(FirstRunModel.problem(account: "localtest", password: " spaced "))
-    XCTAssertEqual(FirstRunModel.problem(account: "localtest", password: ""), .missingPassword)
-    XCTAssertEqual(FirstRunModel.problem(account: "", password: "x"), .invalidAccount)
-  }
+  /// With drafts not saved, Skip setup shows them on the Start page instead of ending: nothing is
+  /// dropped and nothing is saved, and ending the guide from there saves nothing either.
+  func testSkipSetupShowsUnsavedDraftsOnTheStartPageAndSavesNothing() async throws {
+    try await withGuide { panel, model, bridge in
+      let controller = panel.controller
+      model.go(to: .performance)
+      model.choosePreset(.low)
+      model.go(to: .language)
+      let focus = model.titleFocusRequest
+      model.skipSetup()
+      XCTAssertEqual(model.step, .start, "The recap shows what is not saved")
+      XCTAssertTrue(controller.shell.isWelcomeOpen)
+      XCTAssertFalse(controller.welcomeSeen)
+      XCTAssertEqual(model.recap.unsaved.map(\.step), [.performance])
+      XCTAssertFalse(model.performance.isEmpty, "The drafts are kept for Review")
+      XCTAssertEqual(model.titleFocusRequest, focus + 1, "VoiceOver hears where it landed")
+      XCTAssertTrue(bridge.committed.isEmpty)
 
-  // MARK: Steam: signing in against a fake SteamCMD
+      model.skipSetup()
+      XCTAssertEqual(model.step, .start, "Again on Start: nothing happens")
+      XCTAssertTrue(controller.shell.isWelcomeOpen)
 
-  /// A real sign-in-only session: the password reaches Steam's own prompt exactly once and is not
-  /// kept anywhere afterwards, the page ends at "Signed in as ..." with the ownership confirmed,
-  /// and nothing about it shows up as a download.
-  func testSigningInAnswersStepsPromptOnceAndKeepsNothing() async throws {
-    try await withGuide { panel, model, _ in
-      panel.workshop.steamCMDSetup.selectExisting(at: panel.executable)
-      try await panel.waitUntil(timeout: 5) { model.setup.isReady }
-      model.go(to: .steam)
-      XCTAssertTrue(model.phase.showsForm)
-      XCTAssertEqual(model.remembersSession, true, "Keep me signed in starts on")
-
-      model.signInAccount = "LocalTest"
-      let result = await model.submitSignIn(password: "hunter2-secret")
-      XCTAssertEqual(result, .started)
-
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
-      XCTAssertNil(job.errorMessage)
-      let passwordFile = panel.root.appendingPathComponent("password")
-      XCTAssertEqual(
-        try String(contentsOf: passwordFile, encoding: .utf8), "hunter2-secret",
-        "The password reached Steam's own prompt")
-      XCTAssertFalse(model.holdsSecret, "and was dropped once it was answered")
-
-      XCTAssertEqual(model.phase.signedInAccount, "localtest", "The account is the lower-cased login")
-      XCTAssertEqual(model.phase.ownership, .owned)
-      XCTAssertEqual(model.recap.steam, L("Signed in as localtest"))
-      XCTAssertTrue(
-        panel.controller.downloadQueue.downloads.isEmpty
-          || panel.controller.downloadQueue.downloads.allSatisfy { !$0.isSignInOnly },
-        "A finished sign-in is not a download")
+      model.finish()
+      XCTAssertTrue(controller.welcomeSeen)
+      XCTAssertTrue(bridge.committed.isEmpty, "Ending the guide saves no draft")
+      XCTAssertTrue(bridge.renderScaleCalls.isEmpty && bridge.frameRateCapCalls.isEmpty)
     }
   }
 
-  /// Steam's password prompt is answered by the guide whichever page is on show: the person may
-  /// have moved on while the sign-in connects.
-  func testThePasswordIsAnsweredWhateverPageIsOnShow() async throws {
-    try await withGuide { panel, model, _ in
-      panel.workshop.steamCMDSetup.selectExisting(at: panel.executable)
-      try await panel.waitUntil(timeout: 5) { model.setup.isReady }
-      model.go(to: .steam)
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "answered-from-elsewhere")
-      model.go(to: .tips)
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
-      XCTAssertEqual(
-        try String(contentsOf: panel.root.appendingPathComponent("password"), encoding: .utf8),
-        "answered-from-elsewhere")
-      XCTAssertFalse(model.holdsSecret)
-      XCTAssertNil(job.errorMessage)
-    }
-  }
+  /// Escape is Skip setup while the guide is open, and is used up even where that does nothing (a
+  /// second press on the Start page it led to); with the guide closed it is the shell's again.
+  func testEscapeIsSkipSetupWhileTheGuideIsOpen() async throws {
+    try await withGuide { panel, model, bridge in
+      let shell = panel.controller.shell
+      model.go(to: .performance)
+      model.choosePreset(.low)
+      XCTAssertTrue(shell.handleEscape())
+      XCTAssertEqual(model.step, .start, "With a draft it lands on the recap")
+      XCTAssertTrue(shell.handleEscape(), "On Start the key is used up")
+      XCTAssertEqual(model.step, .start, "and does nothing")
+      XCTAssertTrue(shell.isWelcomeOpen)
 
-  /// The focus rule is asked once per change of what it reads: the second ask of an unchanged page
-  /// has nothing to say, and a change that needs the person is said once.
-  func testTheSteamFocusTargetIsReportedOncePerChange() async throws {
-    try await withGuide { _, model, _ in
-      model.go(to: .steam)
-      XCTAssertNil(model.steamFocusTarget(), "An idle form needs nothing")
-      XCTAssertNil(model.steamFocusTarget())
-      model.signInAccount = "bad name"
-      _ = model.validateSignIn(password: "x")
-      XCTAssertEqual(model.steamFocusTarget(), .password, "After a failed attempt the password")
-      XCTAssertNil(model.steamFocusTarget(), "and only once")
+      model.go(to: .performance)
+      model.skipPerformance()
+      XCTAssertEqual(model.step, .preferences)
+      XCTAssertTrue(shell.handleEscape())
+      XCTAssertFalse(shell.isWelcomeOpen, "With nothing unsaved the guide ends")
+      XCTAssertFalse(shell.handleEscape(), "With the guide closed Escape is the shell's again")
+      XCTAssertTrue(bridge.committed.isEmpty)
     }
   }
 
@@ -563,164 +549,5 @@ final class FirstRunModelTests: PanelTestCase {
     let requested = LockScreenRow.make(state: state(available: true), requestIsRunning: true, isCommitting: false)
     XCTAssertEqual(requested.note, .working("Updating…"))
     XCTAssertFalse(requested.isSwitchEnabled)
-  }
-
-  /// A refused ownership check (no license, or nothing found) still lets the person move on, offers
-  /// the store only to a confirmed non-owner, and can be asked again after buying.
-  func testTheOwnershipNoticeNeverBlocksAndCanBeCheckedAgain() async throws {
-    for (output, expected) in [
-      ("No active license found for appID 431960.\n", WorkshopDownloader.WallpaperEngineOwnership.notOwned),
-      ("", .unknown),
-    ] {
-      try await withGuide { panel, model, _ in
-        try output.write(
-          to: panel.root.appendingPathComponent("ownership"), atomically: true, encoding: .utf8)
-        panel.workshop.steamCMDSetup.selectExisting(at: panel.executable)
-        try await panel.waitUntil(timeout: 5) { model.setup.isReady }
-        model.go(to: .steam)
-        model.signInAccount = "localtest"
-        _ = await model.submitSignIn(password: "fixture-password")
-        let first = try await panel.waitForSignIn()
-        try await panel.waitUntil(timeout: 10) { !first.isPending }
-
-        XCTAssertEqual(model.phase.ownership, expected)
-        let notice = OwnershipNotice(ownership: expected)
-        XCTAssertFalse(notice.isSuccess)
-        XCTAssertTrue(notice.offersRecheck)
-        XCTAssertEqual(notice.offersPurchase, expected == .notOwned, "\(expected)")
-        XCTAssertTrue(model.phase.isSignedIn)
-        model.next()
-        XCTAssertEqual(model.step, .performance, "Continue is never held back")
-
-        // After buying: the same account is asked again, and Steam asks for the password again.
-        try FileManager.default.removeItem(at: panel.root.appendingPathComponent("ownership"))
-        model.go(to: .steam)
-        await model.checkOwnership()
-        try await panel.waitUntil(timeout: 5) { panel.workshop.downloader.signIn !== first }
-        let second = try await panel.waitForSignIn()
-        try await panel.waitUntil(timeout: 5) { second.worker.prompt == .password }
-        let row = try XCTUnwrap(model.signInJob)
-        model.submitResponse("fixture-password", toJob: row)
-        try await panel.waitUntil(timeout: 10) { !second.isPending }
-        XCTAssertEqual(model.phase.ownership, .owned)
-        XCTAssertFalse(OwnershipNotice(ownership: .owned).offersRecheck, "An owner has nothing to check")
-      }
-    }
-  }
-
-  /// Cancelling the guide's own sign-in, and skipping while it runs, leave Steam for the first
-  /// download and drop what was held.
-  func testSkippingWhileSigningInCancelsItAndDropsThePassword() async throws {
-    try await withGuide { panel, model, _ in
-      // SteamCMD is not set up: the sign-in waits as a retained request.
-      model.go(to: .steam)
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "never-sent")
-      XCTAssertNotNil(model.signInRequest, "The request waits for SteamCMD")
-      XCTAssertTrue(model.phase.isInProgress)
-      XCTAssertTrue(model.holdsSecret, "The password waits for Steam's prompt")
-
-      await model.skipSteam()
-      XCTAssertNil(model.signInRequest)
-      XCTAssertFalse(model.holdsSecret)
-      XCTAssertEqual(model.step, .performance)
-      XCTAssertTrue(model.phase.showsForm, "Steam is left for the first download to ask")
-      _ = panel
-    }
-  }
-
-  /// Closing the guide drops the held password; whatever Steam was asked keeps running.
-  func testClosingTheGuideDropsTheHeldPassword() async throws {
-    try await withGuide { _, model, _ in
-      model.go(to: .steam)
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "held")
-      XCTAssertTrue(model.holdsSecret)
-      model.close()
-      XCTAssertFalse(model.holdsSecret)
-    }
-  }
-
-  /// The password is never part of anything the model shows or prints.
-  func testNoStateOfTheModelCarriesThePassword() async throws {
-    try await withGuide { _, model, _ in
-      model.go(to: .steam)
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "do-not-leak-this")
-      let rendered = String(reflecting: model.phase) + String(describing: model.signInJob as Any)
-        + (model.error ?? "") + String(describing: model.recap)
-      XCTAssertFalse(rendered.contains("do-not-leak-this"))
-      XCTAssertTrue(model.holdsSecret)
-    }
-  }
-
-  /// A signed-out account stays signed out when the guide is replayed from Settings in the same
-  /// window: the finished sign-in job is still in the downloads list, but it no longer counts until
-  /// the person signs in again.
-  func testASignedOutAccountStaysSignedOutWhenTheGuideIsReplayed() async throws {
-    try await withGuide { panel, model, _ in
-      let controller = panel.controller
-      try await panel.selectFakeSteamCMD()
-      model.go(to: .steam)
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "fixture-password")
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
-      XCTAssertEqual(model.phase.signedInAccount, "localtest")
-
-      panel.dialogs.confirmAnswer = true
-      await model.useDifferentAccount()
-      XCTAssertNil(controller.steamAccount.saved, "The saved sign-in is forgotten")
-      XCTAssertTrue(model.phase.showsForm)
-      XCTAssertNotNil(model.signInJob, "while the finished job stays in the list")
-      model.go(to: .start)
-      model.finish()
-
-      controller.shell.isWelcomeRequested = true
-      model.open()
-      XCTAssertEqual(model.step, .language)
-      XCTAssertTrue(model.phase.showsForm, "Show again does not bring the forgotten account back")
-      XCTAssertFalse(model.recap.offersFinishingSignIn)
-      XCTAssertNotEqual(model.recap.steam, L("Signed in as localtest"))
-
-      // A new sign-in counts again.
-      model.go(to: .steam)
-      _ = await model.submitSignIn(password: "fixture-password")
-      try await panel.waitUntil(timeout: 5) { panel.workshop.downloader.signIn !== job }
-      let second = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !second.isPending }
-      XCTAssertEqual(model.phase.signedInAccount, "localtest")
-    }
-  }
-
-  /// The Steam page's status card is what VoiceOver hears when it changes; the form has none.
-  func testTheSteamStatusFollowsTheSignIn() async throws {
-    try pinPanelLanguageToEnglish()
-    try await withGuide { panel, model, _ in
-      model.go(to: .steam)
-      XCTAssertNil(model.steamStatus, "The form says nothing of its own")
-      try await panel.selectFakeSteamCMD()
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "fixture-password")
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
-      XCTAssertEqual(model.steamStatus, "Signed in as localtest")
-    }
-  }
-
-  /// Use a different account asks first. With no sign-in saved on this Mac (one that was not kept,
-  /// or none) there is nothing left to show as signed in afterwards, so the form is back.
-  func testUseADifferentAccountAsksBeforeSigningOut() async throws {
-    try pinPanelLanguageToEnglish()
-    try await withGuide { panel, model, _ in
-      model.go(to: .steam)
-      XCTAssertFalse(model.dismissedJob)
-      await model.useDifferentAccount()
-      XCTAssertEqual(panel.dialogs.confirmations.map(\.title), ["Log out of Steam?"])
-      XCTAssertNil(model.error, "Declining is not a failure")
-      XCTAssertNil(panel.controller.steamAccount.saved)
-      XCTAssertTrue(model.dismissedJob, "With nothing saved the finished job no longer counts")
-      XCTAssertTrue(model.phase.showsForm)
-    }
   }
 }

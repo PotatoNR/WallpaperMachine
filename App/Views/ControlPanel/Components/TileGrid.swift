@@ -1,17 +1,36 @@
 import SwiftUI
 
+extension EnvironmentValues {
+  /// The width the panel's tile grids prefer, which View › Zoom In and Zoom Out change.
+  @Entry var panelTileWidth: CGFloat = TileGridLayout.preferredTileWidth
+}
+
 /// The geometry of a tile grid, apart from the view so it can be tested.
 enum TileGridLayout {
-  /// The width a tile is drawn at when there is room for it.
+  /// The width a tile is drawn at when there is room for it, at the standard zoom.
   static let preferredTileWidth: CGFloat = 140
+  /// The corner radius of a tile's picture (`WallpaperTile.cornerRadius`), which the panel's other
+  /// pictures share: the Now Playing cover and the season's banner.
+  static let pictureCornerRadius: CGFloat = 10
   static let minimumColumns = 3
+  /// The preferred widths View › Zoom In and Zoom Out step through, one per `TileZoom.steps`;
+  /// the standard one is step 0.
+  static let zoomWidths: [CGFloat] = [112, 140, 176, 220]
+  static let standardZoomIndex = -TileZoom.steps.lowerBound
+
+  /// The preferred tile width at a zoom step.
+  static func preferredWidth(zoom: Int) -> CGFloat {
+    zoomWidths[TileZoom.clamped(zoom) + standardZoomIndex]
+  }
 
   /// How many columns fit `width`: as many tiles of the preferred width and gap as fit, and never
   /// fewer than three, so a narrow window shrinks its tiles instead of dropping to a list.
-  static func columnCount(forWidth width: CGFloat, spacing: CGFloat) -> Int {
-    guard width.isFinite, width > 0 else { return minimumColumns }
+  static func columnCount(
+    forWidth width: CGFloat, spacing: CGFloat, preferredWidth: CGFloat = preferredTileWidth
+  ) -> Int {
+    guard width.isFinite, width > 0, preferredWidth > 0 else { return minimumColumns }
     return max(
-      minimumColumns, Int(((width + spacing) / (preferredTileWidth + spacing)).rounded(.down)))
+      minimumColumns, Int(((width + spacing) / (preferredWidth + spacing)).rounded(.down)))
   }
 
   /// The ways the arrow keys, Home and End move focus.
@@ -33,14 +52,32 @@ enum TileGridLayout {
       }
     return (0..<count).contains(target) ? target : nil
   }
+
+  /// What a key on a focused cell does.
+  enum Activation: Equatable {
+    /// What a click does: select the cell.
+    case click
+    /// What a double click does.
+    case open
+  }
+
+  /// Return or Space on a focused cell acts as a click; Command-Return does what a double click
+  /// does, where the grid has one (`canOpen`), as on the Installed page. Anything else is a click.
+  static func activation(
+    _ key: KeyEquivalent, modifiers: EventModifiers, canOpen: Bool
+  ) -> Activation {
+    key == .return && modifiers.contains(.command) && canOpen ? .open : .click
+  }
 }
 
 /// A lazily built grid of square-artwork cells that fills the width it is given.
 ///
 /// Cells are built only as they scroll into view, so a library of ten thousand wallpapers costs
 /// what the window shows. Every cell can take keyboard focus: the arrow keys move between cells (up
-/// and down by a whole row), Home and End jump to the first and last, and Return or Space calls
-/// `onActivate`. A cell draws its own focus ring from `\.isFocused`; `WallpaperTile` does.
+/// and down by a whole row), Home and End jump to the first and last, Return or Space calls
+/// `onActivate`, and Command-Return calls `onOpen`, the double click's action, where the page
+/// gives one (`TileGridLayout.activation`). A cell draws its own focus ring from `\.isFocused`;
+/// `WallpaperTile` does.
 ///
 /// While the person scrolls (a trackpad or wheel gesture, and the glide after it) the cells take
 /// no pointer: content moving under a still pointer otherwise has every cell's hover, gestures
@@ -52,26 +89,32 @@ struct TileGrid<Item: Identifiable, Cell: View>: View where Item.ID: Hashable {
   let spacing: CGFloat
   let insets: EdgeInsets
   let onActivate: (Item) -> Void
+  let onOpen: ((Item) -> Void)?
   let cell: (Item) -> Cell
 
   @State private var width: CGFloat = 0
   @State private var isUserScrolling = false
+  @Environment(\.panelTileWidth) private var preferredTileWidth
   @FocusState private var focused: Item.ID?
 
   init(
     _ items: [Item], spacing: CGFloat = 14,
     insets: EdgeInsets = EdgeInsets(top: 12, leading: 20, bottom: 20, trailing: 20),
-    onActivate: @escaping (Item) -> Void = { _ in }, @ViewBuilder cell: @escaping (Item) -> Cell
+    onActivate: @escaping (Item) -> Void = { _ in }, onOpen: ((Item) -> Void)? = nil,
+    @ViewBuilder cell: @escaping (Item) -> Cell
   ) {
     self.items = items
     self.spacing = spacing
     self.insets = insets
     self.onActivate = onActivate
+    self.onOpen = onOpen
     self.cell = cell
   }
 
   private var columnCount: Int {
-    TileGridLayout.columnCount(forWidth: width - insets.leading - insets.trailing, spacing: spacing)
+    TileGridLayout.columnCount(
+      forWidth: width - insets.leading - insets.trailing, spacing: spacing,
+      preferredWidth: preferredTileWidth)
   }
 
   var body: some View {
@@ -105,11 +148,14 @@ struct TileGrid<Item: Identifiable, Cell: View>: View where Item.ID: Hashable {
       .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow, .home, .end]) { press in
         move(press.key, proxy: proxy)
       }
-      .onKeyPress(keys: [.return, .space]) { _ in
+      .onKeyPress(keys: [.return, .space]) { press in
         guard let focused, let item = items.first(where: { $0.id == focused }) else {
           return .ignored
         }
-        onActivate(item)
+        switch TileGridLayout.activation(press.key, modifiers: press.modifiers, canOpen: onOpen != nil) {
+        case .click: onActivate(item)
+        case .open: onOpen?(item)
+        }
         return .handled
       }
     }

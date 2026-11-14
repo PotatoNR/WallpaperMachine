@@ -15,13 +15,21 @@ extension PanelController {
 
   /// The problem report the inspector's menu offers for `row` (`InspectorPolicy.issueReport`):
   /// GitHub's form with the failure applying it just met, a plain one for a wallpaper that can run,
-  /// and nil for one that cannot.
+  /// and nil for one that cannot or for a scene waiting for the shared resources.
   func inspectorIssueReportURL(for row: LibraryRow) -> URL? {
-    switch InspectorPolicy.issueReport(for: row, failure: activationFailures[row.id]) {
+    switch inspectorIssueReport(for: row) {
     case .none: nil
     case .plain: issueReportURL(for: row.id)
     case .failure(let failure): issueReportURL(for: row.id, failure: failure)
     }
+  }
+
+  /// What `inspectorIssueReportURL(for:)` offers, which the failure notice and the plain link
+  /// under the type sentence follow too.
+  func inspectorIssueReport(for row: LibraryRow) -> InspectorPolicy.IssueReport {
+    InspectorPolicy.issueReport(
+      for: row, failure: activationFailures[row.id],
+      sceneResourcesMissing: workshopSceneAssetsAreMissing(for: row))
   }
 
   /// Whether the inspector offers **Show in downloads** under the wallpaper: a download of it is in
@@ -40,6 +48,17 @@ extension PanelController {
   /// A scene needs Wallpaper Engine's shared resources before it can play.
   func workshopSceneAssetsAreMissing(for row: LibraryRow) -> Bool {
     row.kind == .scene && !workshop.sceneAssetsReady
+  }
+
+  /// The same for a Workshop item of this kind, installed or not.
+  func workshopSceneAssetsAreMissing(for kind: WorkshopKind) -> Bool {
+    kind == .scene && !workshop.sceneAssetsReady
+  }
+
+  /// Whether the shared scene resources are on their way: their download is waiting or running,
+  /// so the scene notice shows that download instead of asking for it again.
+  var sceneResourcesArePending: Bool {
+    steamDownloadRow(for: WorkshopStore.sceneAssetsRequestID)?.isPending == true
   }
 
   /// **Preview wallpaper**: opens the live preview of an installed wallpaper on the target display

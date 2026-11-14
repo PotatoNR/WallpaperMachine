@@ -19,7 +19,7 @@ struct CapsuleBadge<Content: View>: View {
 
   var body: some View {
     HStack(spacing: 4) { content }
-      .font(.system(size: 11, weight: .semibold))
+      .font(.panel(.badge))
       .foregroundStyle(foreground)
       .lineLimit(1)
       .padding(.horizontal, 7)
@@ -30,7 +30,7 @@ struct CapsuleBadge<Content: View>: View {
   private var foreground: Color {
     switch style {
     case .accent: theme.accent.onPrimary.color
-    case .overlay: .white
+    case .overlay: theme.surface.markGlyph.color
     case .neutral: theme.surface.tagInk.color
     }
   }
@@ -38,7 +38,7 @@ struct CapsuleBadge<Content: View>: View {
   private var background: Color {
     switch style {
     case .accent: theme.accent.primary.color
-    case .overlay: .black.opacity(0.6)
+    case .overlay: theme.surface.markFill.color
     case .neutral: theme.surface.badge.color
     }
   }
@@ -59,7 +59,7 @@ struct CountBadge: View {
 
   var body: some View {
     Text(count, format: .number)
-      .font(.system(size: 11, weight: .semibold).monospacedDigit())
+      .font(.panel(.badge).monospacedDigit())
       .foregroundStyle(
         style == .attention ? theme.accent.onPrimary.color : theme.surface.muted.color
       )

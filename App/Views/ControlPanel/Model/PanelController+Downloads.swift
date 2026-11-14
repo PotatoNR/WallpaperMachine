@@ -24,13 +24,10 @@ extension PanelController {
     workshop.downloader.downloads.map(mediaDownloadRow)
   }
 
-  /// The Steam job of this item (or `WorkshopStore.sceneAssetsRequestID`, or the sign-in's id).
+  /// The Steam job of this item (or `WorkshopStore.sceneAssetsRequestID`).
   func steamDownloadRow(for id: String) -> DownloadRow? {
     workshop.downloader.downloads.first { $0.id == id }.map(mediaDownloadRow)
   }
-
-  /// The sign-in-only job the first-run guide and Settings start, while it exists.
-  var steamSignInRow: DownloadRow? { steamDownloadRow(for: WorkshopStore.signInRequestID) }
 
   /// Every retained request, with the prerequisite each still needs.
   var downloadRequestRows: [DownloadRequestRow] {
@@ -45,10 +42,29 @@ extension PanelController {
   /// SteamCMD's state: whether it is installed, being set up, or needs the user's approval.
   var steamSetup: SteamSetupState { SteamSetupState(workshop.steamCMDSetup) }
 
+  /// The QR-code sign-in. Signed in, downloads skip SteamCMD and its password prompts.
+  var steamQRSession: SteamNativeSession? { workshop.nativeSession }
+
+  /// Whether a Steam download can be tried again right now: SteamCMD is installed, or the QR
+  /// sign-in downloads without it.
+  var steamDownloadsReady: Bool { steamSetup.isReady || workshop.nativeSession?.isSignedIn == true }
+
+  /// Shows a Steam QR code to scan, replacing one already showing. The code keeps renewing until
+  /// it is approved, fails, or `cancelSteamQRSignIn` stops it.
+  func startSteamQRSignIn() async throws {
+    try await run(.immediate) { workshop.nativeSession?.beginQRSignIn() }
+  }
+
+  /// Stops waiting for a QR code: the surface that showed it closed or the person cancelled.
+  func cancelSteamQRSignIn() async throws {
+    try await run(.immediate) { workshop.nativeSession?.cancelQRSignIn() }
+  }
+
   /// The Steam account the next download would use and what the sign-in will remember.
   var steamAccount: SteamAccountState {
     SteamAccountState(
-      suggested: workshop.suggestedAccount, saved: workshop.downloader.savedAccount,
+      suggested: workshop.suggestedAccount,
+      saved: workshop.nativeSession?.accountName ?? workshop.downloader.savedAccount,
       remembersSession: workshop.downloader.rememberSessionWhileRunning ?? remembersSession,
       slotLimit: workshop.downloader.slotLimit,
       downloadsRunOneAtATimeAfterConflict: workshop.downloader.sessionConflictDetected)
@@ -65,10 +81,9 @@ extension PanelController {
   }
 
   /// The job whose password or Steam Guard request should open the download dialog by itself, or
-  /// nil. `dismissed` holds the requests the user closed with **Not now**; `welcomeIsOpen` keeps
-  /// the first-run guide's own sign-in out of the panel's dialog.
-  func steamAuthRequestToSurface(dismissed: Set<SteamAuthKey>, welcomeIsOpen: Bool) -> DownloadRow? {
-    SteamAuthKey.surfaced(in: steamDownloadRows, dismissed: dismissed, welcomeIsOpen: welcomeIsOpen)
+  /// nil. `dismissed` holds the requests the user closed with **Not now**.
+  func steamAuthRequestToSurface(dismissed: Set<SteamAuthKey>) -> DownloadRow? {
+    SteamAuthKey.surfaced(in: steamDownloadRows, dismissed: dismissed)
   }
 
   /// Where the download dialog stands for the item it is open on, or nil when it should close. A
@@ -124,7 +139,7 @@ extension PanelController {
     let id = navigation.targetDisplayID
     let display = store.settingsSnapshot.displays.first { $0.displayId == id }
     return MediaApplyTarget(
-      canShowWallpaper: display.map { $0.enabled && $0.mode == .standalone } ?? false,
+      canShowWallpaper: display?.isIndependent ?? false,
       wallpaperID: store.monitorInformationSnapshot.rows.first { $0.displayId == id }?.wallpaperId)
   }
 
@@ -165,6 +180,16 @@ extension PanelController {
     }
   }
 
+  /// **Get shared resources**, and Apply on a scene while they are missing: asks for the shared
+  /// scene resources and opens the download dialog when the request waits on something (SteamCMD,
+  /// the account, the consent to download them). A download already under way is shown instead.
+  func getSceneResources() async throws {
+    try await requestSceneAssets()
+    if let target = downloadDialogTarget(afterRequesting: nil) {
+      downloads.openDialog(for: target)
+    }
+  }
+
   /// Supplies what a retained request waits on, the account and the consent, and resumes it.
   /// `includeResources` is the user's explicit go-ahead to download the shared resources (several
   /// gigabytes). The account is trimmed, as the dialog's field always was before it was sent, and
@@ -181,18 +206,6 @@ extension PanelController {
           id: id, account: account.trimmingCharacters(in: .whitespacesAndNewlines),
           rememberSession: keepsSession, includeResources: includeResources, bridge: store)
       else { throw InvalidControlValue() }
-      try checkDownloadError()
-    }
-  }
-
-  /// Signs in to Steam without downloading anything, so the account and its saved sign-in are in
-  /// place before the first download (the first-run guide and Settings do this). It rides the same
-  /// ladder as a download: SteamCMD must be set up first. The password is never an argument: Steam
-  /// asks for it through the job's own prompt, answered with `submitDownloadInput`.
-  func steamSignIn(account: String, remembersSession keepsSession: Bool) async throws {
-    try await run(.queued) {
-      remembersSession = keepsSession
-      workshop.requestSignIn(account: account, rememberSession: keepsSession, bridge: store)
       try checkDownloadError()
     }
   }
@@ -223,7 +236,7 @@ extension PanelController {
     try await run(.immediate) { workshop.cancelDownload(id: id) }
   }
 
-  /// Pauses a running or queued download, keeping its content. The sign-in job cannot be paused.
+  /// Pauses a running or queued download, keeping its content.
   func pauseDownload(id: String) async throws {
     try await run(.immediate) {
       guard let job = workshop.downloader.downloads.first(where: { $0.id == id }) else {
@@ -247,17 +260,48 @@ extension PanelController {
     }
   }
 
-  /// Tries a failed or cancelled download again. It re-enters the same prerequisite ladder, and the
-  /// shared resources need their consent again. A job that is still under way is refused.
+  /// Tries a failed or cancelled download again. A failed SteamCMD sign-in opens the account
+  /// choice, including QR sign-in; shared resources still need consent. A pending job is refused.
   func retryDownload(id: String) async throws {
     try await run(.queued) {
       guard let job = workshop.downloader.downloads.first(where: { $0.id == id }), !job.isPending
       else { throw InvalidControlValue() }
-      workshop.continueDownload(
-        id: job.id, account: job.account, rememberSession: remembersSession,
-        includeResources: false, bridge: store)
+      workshop.retryDownload(job, rememberSession: remembersSession, bridge: store)
       try checkDownloadError()
     }
+    if let target = downloadDialogTarget(afterRequesting: id) {
+      downloads.openDialog(for: target)
+    }
+  }
+
+  /// **Download next**: moves a Steam download that waits for a slot to the front of the line.
+  func prioritizeDownload(id: String) async throws {
+    try await run(.immediate) {
+      guard let job = workshop.downloader.downloads.first(where: { $0.id == id }),
+        workshop.downloader.canPrioritize(job)
+      else { throw InvalidControlValue() }
+      workshop.downloader.prioritize(job)
+    }
+  }
+
+  /// **Retry failed**: tries every failed or cancelled download again, Steam's and pixiv's, in
+  /// the order the list shows them. Steam's are left out while SteamCMD is not ready, as their
+  /// own Try again is. The first that cannot start stops the batch and says why.
+  func retryFailedDownloads() async throws {
+    for row in retryableDownloads { try await retryDownload(row) }
+  }
+
+  /// Whether **Download next** would move this row's job: a Steam job waits behind another.
+  func canPrioritizeDownload(_ row: DownloadRow) -> Bool {
+    guard row.source == .steam, row.isQueued,
+      let job = workshop.downloader.downloads.first(where: { $0.id == row.id })
+    else { return false }
+    return workshop.downloader.canPrioritize(job)
+  }
+
+  /// The downloads **Retry failed** would try again.
+  var retryableDownloads: [DownloadRow] {
+    downloadQueue.unresolved.filter { $0.canRetry && ($0.source == .pixiv || steamDownloadsReady) }
   }
 
   /// Answers the password or Steam Guard prompt of a running job.
@@ -288,7 +332,7 @@ extension PanelController {
   /// Not while a download is active or waiting, which the downloader says as this action's error.
   func logOutSteam() async throws {
     try await run(.queued) {
-      let account = workshop.downloader.savedAccount ?? ""
+      let account = workshop.nativeSession?.accountName ?? workshop.downloader.savedAccount ?? ""
       guard
         await dialogs.confirm(
           L("Log out of Steam?"),
@@ -299,6 +343,13 @@ extension PanelController {
       else { return }
       workshop.downloader.forgetSavedAccount()
       if let message = workshop.downloader.errorMessage { throw WallpaperActionError(message: message) }
+      // Only once nothing runs: a download using the QR sign-in needs it until it ends.
+      do {
+        try workshop.nativeSession?.signOut()
+      } catch {
+        // Still signed in, as Settings keeps showing: the keychain kept the token.
+        throw WallpaperActionError(message: L("Could not log out of Steam: \(error.localizedDescription)"))
+      }
     }
   }
 

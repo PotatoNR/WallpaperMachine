@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The Compatibility check card: what the app could establish about the wallpaper before it plays
-/// on the target display, and which backend draws it now. Nothing here is the card's own verdict;
-/// every line comes from the check, and an unknown stays unknown until the wallpaper runs.
+/// on the target display, and what draws it there now, in words, with the renderer's own id
+/// beneath (never for a web page, which nothing reports on). Nothing here is the card's own
+/// verdict; every line comes from the check, and an unknown stays unknown until the wallpaper runs.
 struct CompatibilityCard: View {
   let state: CompatibilityState
   let row: LibraryRow
@@ -41,15 +42,26 @@ struct CompatibilityCard: View {
           }
         }
       }
-      InspectorCardRow {
-        if let backend = InspectorWording.backendLine(state) {
-          Text(verbatim: backend)
-            .font(.system(size: 11.5))
-            .foregroundStyle(theme.surface.text.color)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
-        } else {
-          InspectorNote("Which backend draws it is known once it plays on this display.")
+      if let backend = InspectorWording.backendLine(state) {
+        InspectorCardRow {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: backend.text)
+              .font(.panel(.footnote))
+              .foregroundStyle(theme.surface.text.color)
+              .textSelection(.enabled)
+            if let detail = backend.detail {
+              // The renderer's own id, kept as it is for a problem report.
+              Text(verbatim: detail)
+                .font(.panel(.caption))
+                .foregroundStyle(theme.surface.muted.color)
+                .textSelection(.enabled)
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+        }
+      } else if state.reportsWhatDrawsIt {
+        InspectorCardRow {
+          InspectorNote("How it’s drawn is shown here once it plays on this display.")
         }
       }
       InspectorCardRow {
@@ -65,7 +77,7 @@ struct CompatibilityCard: View {
               Label("Check again", systemImage: "arrow.clockwise")
             }
           }
-          .buttonStyle(.inspectorLink)
+          .buttonStyle(.panelCardLink)
           .disabled(state.isChecking || !state.canCheck || controller.isBusy(checkKey))
           .help(
             state.canCheck
@@ -80,7 +92,7 @@ struct CompatibilityCard: View {
             } label: {
               Label("Reinstall from Workshop…", systemImage: "arrow.triangle.2.circlepath")
             }
-            .buttonStyle(.inspectorLink)
+            .buttonStyle(.panelCardLink)
           }
         }
       }
@@ -101,11 +113,11 @@ struct CompatibilityCard: View {
           .accessibilityLabel(InspectorWording.statusWord(check.status))
         VStack(alignment: .leading, spacing: 2) {
           Text(verbatim: check.title)
-            .font(.system(size: 12.5, weight: .medium))
+            .font(.panel(.label))
             .foregroundStyle(theme.surface.text.color)
           if !check.detail.isEmpty {
             Text(verbatim: check.detail)
-              .font(.system(size: 11.5))
+              .font(.panel(.footnote))
               .foregroundStyle(theme.surface.muted.color)
           }
         }
@@ -156,7 +168,7 @@ struct LetterboxCard: View {
           HStack(spacing: 6) {
             ProgressRing(value: nil, lineWidth: 1.5).frame(width: 12, height: 12)
             Text("Looking for black bars…")
-              .font(.system(size: 11.5))
+              .font(.panel(.footnote))
               .foregroundStyle(theme.surface.muted.color)
           }
           .accessibilityElement(children: .combine)
@@ -176,7 +188,7 @@ struct LetterboxCard: View {
                 "Set scale factor to ×\(InspectorWording.factor(factor))",
                 systemImage: "slider.horizontal.3")
             }
-            .buttonStyle(.inspectorLink)
+            .buttonStyle(.panelCardLink)
             .disabled(!state.isEligible || controller.isBusy(stageKey))
           }
           Button {
@@ -190,7 +202,7 @@ struct LetterboxCard: View {
               Label("Look again", systemImage: "arrow.clockwise")
             }
           }
-          .buttonStyle(.inspectorLink)
+          .buttonStyle(.panelCardLink)
           .disabled(checking || !state.isEligible || controller.isBusy(checkKey))
           .help(
             state.isEligible
@@ -229,11 +241,11 @@ struct LetterboxCard: View {
           .accessibilityHidden(true)
         VStack(alignment: .leading, spacing: 2) {
           Text(verbatim: result.headline)
-            .font(.system(size: 12.5, weight: .medium))
+            .font(.panel(.label))
             .foregroundStyle(theme.surface.text.color)
           if let detail = result.detail {
             Text(verbatim: detail)
-              .font(.system(size: 11.5))
+              .font(.panel(.footnote))
               .foregroundStyle(theme.surface.muted.color)
           }
         }

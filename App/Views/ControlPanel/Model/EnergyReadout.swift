@@ -13,7 +13,7 @@ struct EnergyReadout: Equatable {
 
   /// A condition that stops a figure from being graded or compared, with what it says.
   enum Caveat: Equatable, Sendable {
-    /// A video played through macOS's native player: macOS charges its decoding and drawing to nobody
+    /// A plain video: macOS charges its decoding and drawing to nobody
     /// this app owns.
     case nativeVideo
     /// Other apps kept the GPU busy, which makes macOS charge this app's GPU work more.
@@ -21,7 +21,7 @@ struct EnergyReadout: Equatable {
 
     @MainActor var title: String {
       switch self {
-      case .nativeVideo: L("Native video not counted")
+      case .nativeVideo: L("Video not counted")
       case .gpuContended: L("GPU shared with other apps")
       }
     }
@@ -30,7 +30,7 @@ struct EnergyReadout: Equatable {
       switch self {
       case .nativeVideo:
         L(
-          "macOS decodes and draws videos played with Native video and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays."
+          "macOS decodes and draws videos and charges none of that to this app, so these figures leave most of it out. The grade and any comparison are off while one plays."
         )
       case .gpuContended:
         L(
@@ -147,6 +147,39 @@ struct EnergyReadout: Equatable {
     }
     let text = change > 0 ? "+\(change)%" : "\u{2212}\(abs(change))%"
     return L("Before your change: \(before). Now: \(after) (\(text)).")
+  }
+
+  /// The readout as one spoken line: the grade or the state, the figures and the notes. VoiceOver
+  /// reads it for the Settings row and the menu bar panel's, and it is the menu bar icon's tooltip.
+  @MainActor var summary: String {
+    let comparison = [comparisonNote()].compactMap { $0 }
+    switch status {
+    case .unavailable: return L("Unavailable on this Mac")
+    case .measuring: return ([L("Measuring…")] + comparison).joined(separator: ". ")
+    case .ready:
+      var parts: [String] = []
+      if let first = caveats.first {
+        parts.append(first.title)
+      } else {
+        parts.append(Self.milliwatts(totalMilliwatts))
+        if let levelTitle { parts.append(levelTitle) }
+      }
+      parts.append("\(L("CPU")) \(Self.milliwatts(cpuMilliwatts))")
+      parts.append("\(L("GPU")) \(Self.milliwatts(gpuMilliwatts))")
+      parts += caveats.isEmpty ? [batteryShareNote].compactMap { $0 } : caveats.map(\.note)
+      return (parts + comparison).joined(separator: ". ")
+    }
+  }
+
+  /// The figure beside the menu bar icon: the total once measured, an ellipsis while the first
+  /// reading is taken, nil on a Mac that cannot measure. A caveat does not hide it; the icon draws
+  /// it dimmed and its tooltip says why.
+  @MainActor func menuBarTitle(locale: Locale = .current) -> String? {
+    switch status {
+    case .unavailable: nil
+    case .measuring: "…"
+    case .ready: Self.milliwatts(totalMilliwatts, locale: locale)
+    }
   }
 
   /// "1.2 W" from 1,000 mW, "840 mW" below it, "Unavailable" for a figure that is not a number.

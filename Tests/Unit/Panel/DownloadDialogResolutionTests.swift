@@ -117,10 +117,10 @@ final class DownloadDialogResolutionTests: MediaPanelTestCase {
     let password = job(prompt: .password)
     let dismissed = SteamAuthKey.askingNow(in: [password])
     XCTAssertEqual(dismissed.count, 1)
-    XCTAssertNil(SteamAuthKey.surfaced(in: [password], dismissed: dismissed, welcomeIsOpen: false))
+    XCTAssertNil(SteamAuthKey.surfaced(in: [password], dismissed: dismissed))
     let code = job(challenge: .mobileApproval)
     XCTAssertEqual(
-      SteamAuthKey.surfaced(in: [code], dismissed: dismissed, welcomeIsOpen: false)?.id, "222",
+      SteamAuthKey.surfaced(in: [code], dismissed: dismissed)?.id, "222",
       "a new request for the same job is a new key")
   }
 
@@ -133,20 +133,13 @@ final class DownloadDialogResolutionTests: MediaPanelTestCase {
     XCTAssertEqual(Set(keys.map(\.jobID)), ["q", "222"])
   }
 
-  func testOnlyARunningJobThatAsksSurfacesAndTheWelcomeKeepsItsOwnSignIn() {
+  func testOnlyARunningJobThatAsksSurfaces() {
     let queuedAsking = DownloadRow(id: "q", title: "Q", isPending: true, isQueued: true, prompt: .password)
-    XCTAssertNil(SteamAuthKey.surfaced(in: [queuedAsking], dismissed: [], welcomeIsOpen: false))
-    let signIn = DownloadRow(
-      id: WorkshopStore.signInRequestID, title: "Steam sign-in", isPending: true, isSignInOnly: true,
-      prompt: .password)
-    XCTAssertNil(SteamAuthKey.surfaced(in: [signIn], dismissed: [], welcomeIsOpen: true))
+    XCTAssertNil(SteamAuthKey.surfaced(in: [queuedAsking], dismissed: []))
+    let running = job(prompt: .guardCode)
     XCTAssertEqual(
-      SteamAuthKey.surfaced(in: [signIn], dismissed: [], welcomeIsOpen: false)?.id,
-      WorkshopStore.signInRequestID)
-    let other = job(prompt: .guardCode)
-    XCTAssertEqual(
-      SteamAuthKey.surfaced(in: [signIn, other], dismissed: [], welcomeIsOpen: true)?.id, "222",
-      "the guide skips only its own job")
+      SteamAuthKey.surfaced(in: [queuedAsking, running], dismissed: [])?.id, "222",
+      "the running job that asks, not the one still waiting in line")
   }
 
   func testTheGuideFollowsTheChallengeAndAPasswordNeedsNoGuide() {

@@ -58,26 +58,7 @@ struct PerformanceEnergyReading: View {
   }
 
   /// The readout as one spoken line: the grade or the state, the figures and the notes.
-  var summary: String {
-    switch reading.status {
-    case .unavailable: return L("Unavailable on this Mac")
-    case .measuring: return ([L("Measuring…")] + comparisonLine).joined(separator: ". ")
-    case .ready:
-      var parts: [String] = []
-      if let first = reading.caveats.first {
-        parts.append(first.title)
-      } else {
-        parts.append(EnergyReadout.milliwatts(reading.totalMilliwatts))
-        if let title = reading.levelTitle { parts.append(title) }
-      }
-      parts.append("\(L("CPU")) \(EnergyReadout.milliwatts(reading.cpuMilliwatts))")
-      parts.append("\(L("GPU")) \(EnergyReadout.milliwatts(reading.gpuMilliwatts))")
-      parts += reading.caveats.isEmpty ? [reading.batteryShareNote].compactMap { $0 } : reading.caveats.map(\.note)
-      return (parts + comparisonLine).joined(separator: ". ")
-    }
-  }
-
-  private var comparisonLine: [String] { [reading.comparisonNote()].compactMap { $0 } }
+  var summary: String { reading.summary }
 
   /// The total power in large type, with its grade in a pill.
   private func total(_ reading: EnergyReadout) -> some View {

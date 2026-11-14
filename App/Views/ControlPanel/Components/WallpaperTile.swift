@@ -17,7 +17,8 @@ enum TileEmphasis: Equatable, Sendable {
 /// The tile only draws. It has no gestures of its own: the page that shows it decides what a click,
 /// a double click or a modifier click does, and puts its buttons in the badge slots. The artwork is
 /// whatever the page passes (a `PanelImage`, an `AnimatedPreview`). A selected tile has an accent
-/// ring set off from the artwork by a gap the colour of the surface; a hovered one lifts 2 points.
+/// ring set off from the artwork by a gap the colour of the surface. Hovering does not move it. A
+/// title too long for its line shows in full as the caption's tooltip.
 struct WallpaperTile<Artwork: View>: View {
   let title: String
   var subtitle: String?
@@ -35,10 +36,10 @@ struct WallpaperTile<Artwork: View>: View {
 
   @Environment(\.panelTheme) private var theme
   @Environment(\.isFocused) private var isFocused
+  @Environment(\.libraryCollectionTile) private var collectionTile
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @State private var isHovering = false
 
-  static var cornerRadius: CGFloat { 10 }
+  static var cornerRadius: CGFloat { TileGridLayout.pictureCornerRadius }
 
   init(
     title: String, subtitle: String? = nil, kind: String, isSelected: Bool = false,
@@ -83,7 +84,6 @@ struct WallpaperTile<Artwork: View>: View {
 
   var body: some View {
     let radius = Self.cornerRadius
-    let lifted = isHovering && !reduceMotion
     let emphasis = emphasisOverride ?? (isSelected ? .selected : .none)
     VStack(alignment: .leading, spacing: 7) {
       Color.clear
@@ -92,7 +92,7 @@ struct WallpaperTile<Artwork: View>: View {
         // A ticked tile's artwork darkens by the same 18 % the web panel's `brightness(.82)` took,
         // beneath its own controls so they stay as bright as on any other tile.
         .overlay {
-          if emphasis == .checked { Color.black.opacity(0.18).allowsHitTesting(false) }
+          if emphasis == .checked { theme.surface.scrimSubtle.color.allowsHitTesting(false) }
         }
         .overlay(alignment: .topLeading) { topLeading.padding(6) }
         .overlay(alignment: .topTrailing) { topTrailing.padding(6) }
@@ -104,16 +104,17 @@ struct WallpaperTile<Artwork: View>: View {
             .strokeBorder(theme.surface.divider.color, lineWidth: 0.5)
         }
         .overlay { ring(emphasis, radius: radius) }
-        .shadow(color: .black.opacity(lifted ? 0.2 : 0), radius: lifted ? 9 : 0, y: lifted ? 4 : 0)
-        .offset(y: lifted ? -2 : 0)
       VStack(alignment: .leading, spacing: 1) {
         Text(verbatim: title)
-          .font(.system(size: 12, weight: .semibold))
+          .font(.panel(.calloutStrong))
           .foregroundStyle(theme.surface.text.color)
           .lineLimit(1)
+          // The whole title, for one its line cuts short. Shown on every caption: telling a cut one
+          // apart would measure each tile as the grid scrolls.
+          .help(Text(verbatim: title))
         if let subtitle {
           Text(verbatim: subtitle)
-            .font(.system(size: 11))
+            .font(.panel(.caption))
             .foregroundStyle(theme.surface.muted.color)
             .lineLimit(1)
         }
@@ -121,8 +122,6 @@ struct WallpaperTile<Artwork: View>: View {
       .padding(.horizontal, 2)
     }
     .contentShape(Rectangle())
-    .onHover { isHovering = $0 }
-    .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: lifted)
     .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: emphasis)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(Text(verbatim: "\(title), \(kind)"))
@@ -140,7 +139,7 @@ struct WallpaperTile<Artwork: View>: View {
     case .quietSelection:
       outlined(radius: radius, color: theme.surface.muted.color, lineWidth: 1.5)
     case .none:
-      if isFocused {
+      if collectionTile?.isFocused ?? isFocused {
         RoundedRectangle(cornerRadius: radius + 2, style: .continuous)
           .strokeBorder(theme.accent.focus.color, lineWidth: 2)
           .padding(-2)

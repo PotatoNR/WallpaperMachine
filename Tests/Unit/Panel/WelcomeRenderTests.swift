@@ -72,7 +72,7 @@ final class WelcomeRenderTests: PanelTestCase {
     }
   }
 
-  /// With drafts, a failure on the page and an unfinished Steam sign-in the pages still fit.
+  /// With drafts and a failure on the page the pages still fit.
   func testPagesWithDraftsAndMessagesStillFit() async throws {
     try await withPanel(welcomeSeen: false) { panel in
       let harness = try WelcomeRenderHarness(panel: panel)
@@ -234,125 +234,120 @@ final class WelcomeRenderTests: PanelTestCase {
     }
   }
 
-  // MARK: Typing on the Steam page
+  // MARK: Steam
 
-  /// A Steam Guard code being typed survives every job update that does not change what Steam asks,
-  /// with the cursor where it was and the field still focused; only a different question brings a
-  /// new, empty field.
-  func testATypedSteamGuardCodeSurvivesProgressUpdates() async throws {
+  /// The Tips page offers where to get a Steam account and Wallpaper Engine by the download
+  /// dialog's rule: only while no Steam account is signed in on this Mac, so a guide replayed by
+  /// someone signed in does not offer them. The page is hosted on its own: inside the guide's
+  /// scroll view its own elements are not in the accessibility tree.
+  func testTheTipsPageOffersTheSteamLinksOnlyUntilASteamAccountIsSaved() async throws {
     try await withPanel(welcomeSeen: false) { panel in
-      let box = WelcomeJobBox(
-        DownloadRow(
-          id: WorkshopStore.signInRequestID, title: "Steam sign-in", status: "Waiting for the code",
-          account: "localtest", isPending: true, isSignInOnly: true, isAuthenticating: true,
-          prompt: .guardCode, challenge: .emailCode))
       let harness = try WelcomeRenderHarness(panel: panel) { controller in
-        AnyView(WelcomePromptHost(box: box).welcomeTestEnvironment(controller))
+        AnyView(WelcomeTipsPage().environment(controller.welcome))
       }
-      try await harness.layout(at: sizes[0])
-      let field = try XCTUnwrap(harness.textFields().first)
-      harness.type("R4K", into: field)
-      XCTAssertEqual(field.stringValue, "R4K")
+      @MainActor func links() -> AccessibilityElement? {
+        AccessibilityElement(object: harness.hosting.view).first(identifier: "welcome-steam-join")
+      }
+      try await harness.layout(at: sizes[1])
+      XCTAssertNotNil(links(), "No account yet: the page says where to get one")
 
-      for status in ["Still waiting for the code", "Waiting for Steam Guard"] {
-        box.job = DownloadRow(
-          id: WorkshopStore.signInRequestID, title: "Steam sign-in", status: status,
-          account: "localtest", progress: 0.2, isPending: true, isSignInOnly: true,
-          isAuthenticating: true, prompt: .guardCode, challenge: .emailCode)
+      try await panel.saveSteamAccount()
+      try await harness.layout(at: sizes[1])
+      XCTAssertNotNil(panel.controller.steamAccount.saved)
+      XCTAssertNil(links(), "Signed in: nothing to get")
+      harness.close()
+    }
+  }
+
+  // MARK: Skip setup
+
+  /// Skip setup sits at the card's top right on every page but Start, clear of the progress dots,
+  /// in the smallest window and in every language; Start, where Start using the app ends the
+  /// guide, has none.
+  func testSkipSetupSitsBesideTheProgressOnEveryPageButStart() async throws {
+    try await withPanel(welcomeSeen: false) { panel in
+      let model = panel.controller.welcome
+      for language in AppLanguage.supported.map(\.tag) {
+        let harness = try WelcomeRenderHarness(panel: panel, language: language)
         try await harness.layout(at: sizes[0])
-        let kept = try XCTUnwrap(harness.textFields().first)
-        XCTAssertEqual(kept.stringValue, "R4K", "\(status): the typed code stays")
-        XCTAssertTrue(harness.isEditing(kept), "and the field keeps the keyboard")
-        XCTAssertEqual(kept.currentEditor()?.selectedRange, NSRange(location: 3, length: 0))
+        let dotNames = Set(WelcomeStep.allCases.map(\.name))
+        for step in WelcomeStep.allCases {
+          model.go(to: step)
+          try await harness.layout(at: sizes[0])
+          let tree = AccessibilityElement(object: harness.hosting.view).all()
+          let skip = tree.first { $0.identifier == "welcome-skip-setup" }
+          if step.isLast {
+            XCTAssertNil(skip, "\(language): no Skip setup on Start")
+            continue
+          }
+          let button = try XCTUnwrap(skip, "\(language) \(step): Skip setup is drawn")
+          XCTAssertEqual(button.role, NSAccessibility.Role.button.rawValue, "\(language) \(step)")
+          let dots = tree.filter { dotNames.contains($0.label) && $0.role == NSAccessibility.Role.button.rawValue }
+          XCTAssertEqual(dots.count, WelcomeStep.allCases.count, "\(language) \(step): every dot is reachable")
+          for dot in dots {
+            XCTAssertFalse(
+              button.frame.intersects(dot.frame), "\(language) \(step): Skip setup covers the \(dot.label) dot")
+          }
+        }
+        model.go(to: .language)
+        harness.close()
       }
-
-      box.job = DownloadRow(
-        id: WorkshopStore.signInRequestID, title: "Steam sign-in", account: "localtest",
-        isPending: true, isSignInOnly: true, isAuthenticating: true, prompt: .password)
-      try await harness.layout(at: sizes[0])
-      let replaced = try XCTUnwrap(harness.textFields().first)
-      XCTAssertTrue(replaced is NSSecureTextField, "Steam now asks for the password")
-      XCTAssertEqual(replaced.stringValue, "", "A different question starts empty")
-      harness.close()
     }
   }
 
-  /// Show and Hide password keep what was typed, through updates of the page; Sign in empties the
-  /// field before anything is sent, and the password reaches Steam's prompt once.
-  func testShowingAndHidingThePasswordKeepsItAndSigningInEmptiesTheField() async throws {
+  /// Escape presses Skip setup, the button's cancel shortcut: it ends a guide with nothing unsaved,
+  /// and on Start, where there is no Skip setup, it does nothing.
+  func testEscapeInTheWindowIsSkipSetup() async throws {
     try await withPanel(welcomeSeen: false) { panel in
-      let model = panel.controller.welcome
-      try await panel.selectFakeSteamCMD()
-      // The form on its own; the open guide around it is what answers Steam's password prompt.
-      model.open()
-      defer { model.close() }
-      let harness = try WelcomeRenderHarness(panel: panel) { controller in
-        AnyView(WelcomeSignInFormHost().welcomeTestEnvironment(controller))
-      }
-      try await harness.layout(at: sizes[1])
-      model.signInAccount = "localtest"
-      try await harness.layout(at: sizes[1])
-      let secure = try XCTUnwrap(harness.textFields().compactMap { $0 as? NSSecureTextField }.first)
-      harness.type("hunter2-secret", into: secure)
-
-      model.revealsPassword = true  // what the eye button does
-      model.remembersSession = false  // and the page redraws in between
-      try await harness.layout(at: sizes[1])
-      XCTAssertTrue(
-        harness.textFields().allSatisfy { !($0 is NSSecureTextField) }, "The password shows as text")
-      XCTAssertTrue(
-        harness.textFields().contains { $0.stringValue == "hunter2-secret" }, "with what was typed")
-
-      model.revealsPassword = false
-      model.remembersSession = true
-      try await harness.layout(at: sizes[1])
-      let hidden = try XCTUnwrap(harness.textFields().compactMap { $0 as? NSSecureTextField }.first)
-      XCTAssertEqual(hidden.stringValue, "hunter2-secret", "Hidden again, still typed")
-
-      model.revealsPassword = true
-      try await harness.layout(at: sizes[1])
-      let revealed = try XCTUnwrap(harness.textFields().last)
-      harness.pressReturn(in: revealed)
-      try await harness.layout(at: sizes[1])
-      XCTAssertFalse(model.revealsPassword, "Sign in puts the dots back")
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
-      try await harness.layout(at: sizes[1])
-      let fields = harness.textFields()
-      XCTAssertFalse(fields.contains { $0.stringValue == "hunter2-secret" }, "No field keeps the password")
-      XCTAssertEqual(
-        try String(contentsOf: panel.root.appendingPathComponent("password"), encoding: .utf8),
-        "hunter2-secret", "Steam's prompt got it")
-      XCTAssertFalse(model.holdsSecret)
-      harness.close()
-    }
-  }
-
-  // MARK: VoiceOver
-
-  /// A change of the Steam page's status is announced, once per change and never on arrival.
-  func testAChangeOfTheSteamStatusIsAnnounced() async throws {
-    try await withPanel(welcomeSeen: false) { panel in
-      let model = panel.controller.welcome
-      var announced = [String]()
-      model.announce = { announced.append($0) }
       let harness = try WelcomeRenderHarness(panel: panel)
+      let model = panel.controller.welcome
+      let escape = try XCTUnwrap(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+          windowNumber: harness.window.windowNumber, context: nil, characters: "\u{1B}",
+          charactersIgnoringModifiers: "\u{1B}", isARepeat: false, keyCode: 53))
+      model.go(to: .start)
       try await harness.layout(at: sizes[1])
-      model.go(to: .steam)
-      try await panel.selectFakeSteamCMD()
+      _ = harness.window.performKeyEquivalent(with: escape)
       try await harness.layout(at: sizes[1])
-      XCTAssertEqual(announced, [], "Arriving on the form announces nothing")
+      XCTAssertTrue(panel.controller.shell.isWelcomeOpen, "Start has no Skip setup")
 
-      model.signInAccount = "localtest"
-      _ = await model.submitSignIn(password: "fixture-password")
-      let job = try await panel.waitForSignIn()
-      try await panel.waitUntil(timeout: 10) { !job.isPending }
+      model.go(to: .tips)
       try await harness.layout(at: sizes[1])
-      XCTAssertEqual(announced.last, L("Signed in as localtest"))
-      XCTAssertFalse(announced.contains { $0.contains("fixture-password") })
-      let count = announced.count
+      XCTAssertTrue(harness.window.performKeyEquivalent(with: escape), "Escape is the button's shortcut")
       try await harness.layout(at: sizes[1])
-      XCTAssertEqual(announced.count, count, "Nothing changed, nothing more is said")
+      XCTAssertFalse(panel.controller.shell.isWelcomeOpen, "and ends the guide")
+      XCTAssertTrue(panel.controller.welcomeSeen)
+      harness.close()
+    }
+  }
+
+  /// The Start page's lead changes when drafts are not saved, which Skip setup with drafts lands
+  /// on: VoiceOver starts at the title, and the rows listing the drafts come later.
+  func testTheStartLeadSaysWhenChangesAreNotSaved() async throws {
+    try await withPanel(welcomeSeen: false) { panel in
+      let model = panel.controller.welcome
+      let harness = try WelcomeRenderHarness(panel: panel) { controller in
+        AnyView(WelcomeStartPage().environment(controller.welcome))
+      }
+      @MainActor func texts() -> Set<String> {
+        Set(AccessibilityElement(object: harness.hosting.view).all().map(\.text).filter { !$0.isEmpty })
+      }
+      try await harness.layout(at: sizes[1])
+      let saved = texts()
+      XCTAssertFalse(saved.isEmpty, "The hosted page must expose its accessible text")
+      model.choosePreset(.low)
+      XCTAssertGreaterThan(model.unsavedPerformanceCount, 0)
+      try await harness.layout(at: sizes[1])
+      let unsaved = texts()
+      XCTAssertFalse(
+        saved.subtracting(unsaved).isEmpty, "With drafts, the lead for a guide with nothing unsaved is gone")
+      XCTAssertFalse(model.recap.unsaved.isEmpty)
+      model.skipPerformance()
+      try await harness.layout(at: sizes[1])
+      XCTAssertTrue(model.recap.unsaved.isEmpty)
+      XCTAssertEqual(texts(), saved, "Discarding the drafts must also remove the unsaved lead")
+      XCTAssertFalse(harness.window.isVisible)
       harness.close()
     }
   }
@@ -372,16 +367,91 @@ final class WelcomeRenderTests: PanelTestCase {
             controller.openSupportURL = { _ in false }
             await controller.supportPrompt.choose(.star)
           }
-          let hosting = NSHostingView(
-            rootView: SupportPromptSheet(presenter: controller.supportPrompt)
-              .panelTheme(theme: controller.theme, locale: PanelLocale.shared))
-          hosting.layoutSubtreeIfNeeded()
-          let size = hosting.fittingSize
-          XCTAssertEqual(size.width, 440, accuracy: 1, "\(language): the sheet keeps its width")
-          XCTAssertLessThan(size.height, 480, "\(language): the sheet stays small")
-          XCTAssertGreaterThan(size.height, 200, "\(language): and shows its content")
+          assertSheetFits(controller, language)
         }
       }
     }
+  }
+
+  /// The Discord invitation too, in every language, Chinese included, with and without the error
+  /// line of a link that could not be opened.
+  func testTheDiscordInvitationFitsItsWidthInEveryLanguage() async throws {
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    let prompt = SupportPromptStore(defaults: defaults)
+    prompt.qualifyForDiscordInvitation()
+    try await withPanel(supportPrompt: prompt) { panel in
+      let controller = panel.controller
+      panel.show()
+      XCTAssertEqual(controller.supportPrompt.prompt, .discord)
+      for failing in [false, true] {
+        if failing {
+          controller.openSupportURL = { _ in false }
+          await controller.supportPrompt.choose(.joinDiscord)
+          XCTAssertNotNil(controller.supportPrompt.error)
+        }
+        for language in AppLanguage.supported.map(\.tag) {
+          try controller.appLanguage.set(language)
+          PanelLocale.shared.bind(to: controller.appLanguage)
+          assertSheetFits(controller, language)
+        }
+      }
+    }
+  }
+
+  /// The battery question too, with its three choices and the playing wallpaper's measured share of
+  /// a charge, in every language, with and without the error line of a refused setting.
+  func testTheBatteryQuestionFitsItsWidthInEveryLanguage() async throws {
+    let defaults = try TemporaryDefaults.make(for: self).defaults
+    let prompt = SupportPromptStore(defaults: defaults)
+    prompt.recordTelemetryAsked()
+    try await withPanel(supportPrompt: prompt) { panel in
+      let controller = panel.controller
+      controller.batteryPercent = 54
+      panel.store.settingsSnapshot.onBatteryPower = true
+      panel.store.settingsSnapshot.batteryTargetFps = 30
+      panel.store.settingsSnapshot.batteryRenderScale = 0.75
+      panel.store.librarySnapshot.wallpapers = [
+        BridgeWallpaperEntry(
+          id: "scene", title: "Scene", kind: .projectScene, supported: true, active: true,
+          selected: false, previewPath: nil)
+      ]
+      panel.store.appSnapshot.activeWallpaperIds = ["scene"]
+      panel.store.appSnapshot.playbackState = .playing
+      let ratings = WallpaperEnergyRatings(
+        file: panel.root.appendingPathComponent("energy-ratings.json"), batteryWattHours: { 50 })
+      ratings.record(
+        WallpaperEnergyContext(
+          wallpaperID: "scene",
+          conditions: WallpaperEnergyConditions(displays: 1, frameRateCap: nil, renderScale: 1)),
+        milliwatts: 4_600, seconds: 150)
+      panel.store.wallpaperEnergyRatings = ratings
+      panel.show()
+      XCTAssertEqual(controller.supportPrompt.prompt, .battery)
+      for failing in [false, true] {
+        if failing {
+          // No engine answer: the choice is refused and the sheet says why.
+          await controller.supportPrompt.choose(.alwaysPauseOnBattery)
+          XCTAssertNotNil(controller.supportPrompt.error)
+        }
+        for language in AppLanguage.supported.map(\.tag) {
+          try controller.appLanguage.set(language)
+          PanelLocale.shared.bind(to: controller.appLanguage)
+          assertSheetFits(controller, language)
+        }
+      }
+    }
+  }
+
+  private func assertSheetFits(
+    _ controller: PanelController, _ language: String, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    let hosting = NSHostingView(
+      rootView: SupportPromptSheet(presenter: controller.supportPrompt)
+        .panelTheme(theme: controller.theme, locale: PanelLocale.shared))
+    hosting.layoutSubtreeIfNeeded()
+    let size = hosting.fittingSize
+    XCTAssertEqual(size.width, 440, accuracy: 1, "\(language): the sheet keeps its width", file: file, line: line)
+    XCTAssertLessThan(size.height, 480, "\(language): the sheet stays small", file: file, line: line)
+    XCTAssertGreaterThan(size.height, 200, "\(language): and shows its content", file: file, line: line)
   }
 }

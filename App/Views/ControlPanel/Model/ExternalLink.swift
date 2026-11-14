@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Every address the panel opens outside the app goes through here: Steam, GitHub, pixiv, Apple's
-/// support pages and the licence text. A link built from remote data (a Workshop item, an author's
+/// support pages, the licence text, MMFoundation's website, its Discord and its Open Collective. A link built from remote data (a Workshop item, an author's
 /// profile, a pixiv work) is only as trustworthy as the host it names, so `isAllowed` is the one
 /// gate for `Link`, `openURL` and every button that opens one. Support-prompt links go through
 /// their own injected opener and are not covered by it.
@@ -12,6 +12,7 @@ enum ExternalLink {
   static let allowedHosts: Set<String> = [
     "steamcommunity.com", "store.steampowered.com", "help.steampowered.com", "github.com",
     "www.gnu.org", "support.apple.com", "space.bilibili.com", "www.bilibili.com", "www.pixiv.net",
+    "mmfoundation.dev", "opencollective.com",
   ]
 
   /// Whether the panel may open `url`: https, a host on the list, and no user, password or port.
@@ -47,7 +48,15 @@ enum ExternalLink {
     string: "https://store.steampowered.com/app/431960/Wallpaper_Engine/")!
   /// Apple's page on how macOS treats apps it cannot verify.
   static let macOSAppSecurity = URL(string: "https://support.apple.com/en-us/102445")!
-  static let gnuGPL2 = URL(string: "https://www.gnu.org/licenses/old-licenses/gpl-2.0.html")!
+  static let gnuGPL3 = URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!
+  /// The website of MMFoundation, the organization that makes WallpaperMachine.
+  static let mmfoundation = URL(string: "https://mmfoundation.dev/")!
+  /// MMFoundation's Discord server. The website redirects this address to the current invite, so a
+  /// new invite needs no app release; never link the invite itself.
+  static let discord = URL(string: "https://mmfoundation.dev/discord")!
+  /// MMFoundation's Open Collective, where sponsoring goes: the support prompt's **Sponsor on Open
+  /// Collective**. Open Collective picks its own language, so every app language opens this page.
+  static let openCollective = URL(string: "https://opencollective.com/mmfoundation")!
 
   // MARK: Built links
 
@@ -68,15 +77,20 @@ enum ExternalLink {
     return URL(string: "https://www.pixiv.net/artworks/\(id)")
   }
 
-  /// GitHub's new-issue form pre-filled with `title` and `body`. Nothing is sent from here:
-  /// the browser opens the draft and the user decides whether to submit it.
-  static func newIssue(title: String, body: String) -> URL? {
+  /// GitHub's bug report form (`.github/ISSUE_TEMPLATE/bug_report.yml`) with `title` and what the
+  /// app knows filled in. What the user did, saw and expected stay empty: the form requires the user
+  /// to write them before it can be sent. Nothing is sent from here: the browser opens the draft and
+  /// the user decides whether to submit it.
+  static func newIssue(title: String, wallpaper: String, version: String, details: String) -> URL? {
     guard
       var components = URLComponents(
         url: repository.appendingPathComponent("issues/new"), resolvingAgainstBaseURL: false)
     else { return nil }
+    // After `template` and `title`, each name is a field `id` in bug_report.yml: rename them together.
     components.queryItems = [
-      URLQueryItem(name: "title", value: title), URLQueryItem(name: "body", value: body),
+      URLQueryItem(name: "template", value: "bug_report.yml"), URLQueryItem(name: "title", value: title),
+      URLQueryItem(name: "wallpaper", value: wallpaper), URLQueryItem(name: "version", value: version),
+      URLQueryItem(name: "app-details", value: details),
     ]
     return components.url
   }
@@ -85,7 +99,7 @@ enum ExternalLink {
   static var fixedLinks: [URL] {
     [
       steamMobileApp, steamEmailedCodeHelp, steamJoin, wallpaperEngineStore, macOSAppSecurity,
-      gnuGPL2, repository, repositoryIssues,
+      gnuGPL3, mmfoundation, discord, openCollective, repository, repositoryIssues,
     ]
   }
 }

@@ -19,6 +19,8 @@ struct DisplaysCardSearch {
     var showsResume = false
     /// How often reads Custom, so the minutes field shows.
     var showsCustomInterval = false
+    /// A rotation changes on a timer, so Wait for the video to finish shows.
+    var rotatesOnTimer = false
     /// A rotation draws from the display's own list, so the list shows.
     var listsOwnWallpapers = false
     var hasSkipped = false
@@ -90,7 +92,7 @@ struct DisplaysCardSearch {
     typealias S = DisplaysSettingsSection
     switch disclosure?.id {
     case nil:
-      return [S.enable, S.mode, rows.isMirror ? S.mirrorSource : S.wallpaper]
+      return [S.enable, S.mode] + (rows.isMirror ? [S.mirrorSource] : [S.wallpaper, S.desktops])
         + (rows.isMirror ? [] : [S.playlist]) + (rows.hasPeers ? [S.transfer] : [])
         + [S.automation, S.playback]
     case S.playlist.id:
@@ -100,6 +102,7 @@ struct DisplaysCardSearch {
       case .rotate:
         items += [S.playlistSource, S.playlistOrder, S.playlistInterval]
         if rows.showsCustomInterval { items.append(S.playlistCustom) }
+        if rows.rotatesOnTimer { items.append(S.playlistClipEnd) }
         if rows.listsOwnWallpapers { items.append(S.playlistList) }
         if rows.hasSkipped { items.append(S.playlistSkipped) }
         items.append(S.playlistNext)
@@ -117,7 +120,7 @@ struct DisplaysCardSearch {
       switch rows.automationMode {
       case .off: body = []
       case .appearance: body = [S.automationLight, S.automationDark]
-      case .spaces: body = [S.automationSpaces]
+      case .spaces: body = []
       case .schedule: body = [S.automationSchedule]
       }
       return [S.automationMode] + body + [S.automationFooter]
@@ -158,6 +161,7 @@ extension DisplaysCardSearch {
       isMirror: display.isMirror, playlistMode: playlist.playlist.mode, showsResume: playlist.showsResume,
       showsCustomInterval:
         controller.displaysSettings.intervalDraft(of: display.id).selection(for: playlist.playlist) == .custom,
+      rotatesOnTimer: playlist.playlist.trigger == .interval,
       listsOwnWallpapers: playlist.playlist.source == .list, hasSkipped: !playlist.skipped.isEmpty,
       showsNextSwitch: playlist.nextChangeText(locale: PanelLocale.shared.locale) != nil,
       hasPeers: !controller.transferPeers(of: display.id).isEmpty,

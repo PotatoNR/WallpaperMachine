@@ -24,7 +24,20 @@ struct TileDownloadState: Equatable {
 
   /// The mark in the ring's centre when it has no text.
   enum Glyph: Equatable {
-    case play, shield, download, refresh
+    /// A paused download: a click resumes it.
+    case resume
+    case shield, download, refresh
+
+    /// The SF Symbol the Workshop's and pixiv's rings draw for it. Resume and retry are the
+    /// symbols of the same actions in the inspectors and the Downloads list (`DownloadRowAction`).
+    var systemImage: String {
+      switch self {
+      case .resume: DownloadRowAction.resume.systemImage
+      case .shield: "exclamationmark.shield.fill"
+      case .download: "arrow.down"
+      case .refresh: DownloadRowAction.retry.systemImage
+      }
+    }
   }
 
   enum Action: Equatable {
@@ -33,7 +46,7 @@ struct TileDownloadState: Equatable {
 
   let kind: Kind
   let glyph: Glyph?
-  /// A click cancels, so hovering swaps the centre for a close mark.
+  /// A click cancels, so the ring may swap its centre for a close mark (`showsClose`).
   let showsCloseOnHover: Bool
   /// The fraction drawn, 0...1, for `.progress`.
   let progress: Double?
@@ -47,8 +60,15 @@ struct TileDownloadState: Equatable {
   let action: Action
   /// The tooltip and the accessibility label.
   let label: String
-  /// A retry waits for SteamCMD to be set up.
+  /// A retry waits for SteamCMD to be set up, or for the QR sign-in.
   let isEnabled: Bool
+
+  /// Whether the ring shows its close mark instead of its centre: a ring whose click cancels shows
+  /// it while hovered or while its tile has keyboard focus, so someone without a pointer on it
+  /// still sees what the click does. Both rings, Workshop's and pixiv's, ask this.
+  func showsClose(isHovering: Bool, isFocused: Bool) -> Bool {
+    showsCloseOnHover && (isHovering || isFocused)
+  }
 
   // MARK: Workshop
 
@@ -62,7 +82,7 @@ struct TileDownloadState: Equatable {
     if let request {
       return request.isPaused
         ? TileDownloadState(
-          kind: .queued, glyph: .play, action: .resume, label: L("Resume download"))
+          kind: .queued, glyph: .resume, action: .resume, label: L("Resume download"))
         : TileDownloadState(
           kind: .attention, glyph: .shield, action: .continueSetup,
           label: L("Continue setup to download \(title)"))
@@ -83,7 +103,7 @@ struct TileDownloadState: Equatable {
     }
     if job.isPaused {
       return TileDownloadState(
-        kind: .queued, glyph: .play, action: .resume, label: L("Resume download"))
+        kind: .queued, glyph: .resume, action: .resume, label: L("Resume download"))
     }
     if job.needsReview {
       let reason = job.hasError ? job.errorMessage ?? "" : L("Download cancelled.")
@@ -162,7 +182,7 @@ struct TileDownloadState: Equatable {
     switch job.status {
     case .paused:
       state = TileDownloadState(
-        kind: .queued, glyph: .play, action: .resume, label: L("Resume download"))
+        kind: .queued, glyph: .resume, action: .resume, label: L("Resume download"))
     case .waiting:
       state = TileDownloadState(
         kind: .queued, glyph: .download, showsCloseOnHover: true, action: .cancel,

@@ -1,42 +1,81 @@
 import Foundation
 import Observation
 
-/// The panel's four one-time prompts and when each may appear.
+/// The panel's six one-time prompts and when each may appear.
 ///
-/// - `support` asks for support once a successfully downloaded wallpaper has been applied.
+/// - `support` asks for support once a successfully downloaded wallpaper has been applied, but not
+///   then: it waits at least `supportDelay` (a day) after that apply, and comes the first time the
+///   panel window is shown after that (opened, brought back from the Dock, or shown again after
+///   the app was hidden), so a window left open across the mark does not interrupt.
 /// - `star` asks for a GitHub star, once, from someone who did not choose it in the support
 ///   prompt, after 14 days and on at least 5 different days of opening the panel. Someone who
 ///   never downloads a wallpaper, and so never sees the support prompt, gets it too.
 /// - `telemetry` asks once whether to send performance data, only someone who had finished the
 ///   welcome guide before it offered the switch; the guide asks everyone else.
+/// - `battery` asks once whether to save battery, on a Mac with an internal battery that runs on
+///   it now (or has, with a wallpaper playing, since the app started), while a wallpaper plays and
+///   nothing saves battery yet: On battery and "When another app is in front" both Keep running.
+///   The guide's Preferences page, which shows the On battery choice, and a battery choice made in
+///   Settings or the menu bar count as asking it.
 /// - `subscriptions` offers once to import the Steam subscriptions, to someone who finished the
-///   guide and is signed in to Steam but has never signed in to Steam Community here: someone who
-///   finished the guide before it offered the import, or skipped its Steam page. The guide's
-///   offer, or signing in to Steam Community anywhere, spends it.
+///   guide and is signed in to Steam but never met the import here: someone who finished the
+///   guide before it offered the import, or who signed in at a download (the guide asks for no
+///   Steam account). Having met it in an earlier guide, or signing in to Steam Community
+///   anywhere, spends it.
+/// - `discord` invites once to MMFoundation's Discord, after 21 days and on at least 7 different
+///   days of opening the panel: the star's clock, a week and two days of use later, so it never
+///   comes before the star and, for someone new, usually not right after it. Joining from
+///   Settings › About or the Help menu spends it.
 ///
-/// At most one is pending at a time, in that order of priority (telemetry, subscriptions,
-/// support, star), and
-/// none appears on the same day as another. "First use" for the star prompt is the first day
-/// the panel was opened with a build that counts it, so an existing user's clock starts at the
-/// update.
+/// At most one is pending at a time, in that order of priority (telemetry, battery, subscriptions,
+/// support, star, discord), and none appears on the same day as another, or on the day the
+/// first-run guide ended: the guide was that day's question. "First use" for the star and Discord
+/// prompts is the first day the panel was opened with a build that counts it, so an existing
+/// user's clock starts at the update that brought the star prompt.
 @MainActor
 @Observable
 final class SupportPromptStore {
     enum Prompt: String {
-        case telemetry, subscriptions, support, star
+        case telemetry, battery, subscriptions, support, star, discord
     }
 
+    /// What the battery question depends on, as the panel reads it when it asks for the prompt.
+    /// The default asks nothing.
+    struct BatteryFacts: Equatable {
+        /// The Mac has an internal battery (a UPS is not one).
+        var hasBattery = false
+        /// It runs on battery now.
+        var onBattery = false
+        /// A wallpaper is on a display and not paused.
+        var wallpaperPlaying = false
+        var batteryMode = BridgeBatteryMode.keepRunning
+        var otherAppInFront = OtherAppInFrontAction.keepRunning
+
+        /// Nothing saves battery yet: both choices are still Keep running.
+        var keepsRunning: Bool { batteryMode == .keepRunning && otherAppInFront == .keepRunning }
+    }
+
+    /// How long the support offer waits after the apply that earned it.
+    static let supportDelay: TimeInterval = 24 * 60 * 60
     static let starDelay: TimeInterval = 14 * 24 * 60 * 60
     static let starUseDays = 5
+    static let discordDelay: TimeInterval = 21 * 24 * 60 * 60
+    static let discordUseDays = 7
 
     private struct State: Codable {
         var downloadedWallpaperIDs: Set<String> = []
         var pending = false
         var presented = false
+        /// When the apply that earned the support offer happened; nil for an offer earned under a
+        /// build that did not record it, which is due at once.
+        var qualifiedAt: Date?
         var starChosen = false
         var starPresented = false
         var telemetryAsked = false
+        var batteryAsked = false
         var subscriptionsOffered = false
+        var discordChosen = false
+        var discordPresented = false
         var firstUseAt: Date?
         var useDays = 0
         var lastUseDay: Date?
@@ -50,10 +89,14 @@ final class SupportPromptStore {
             downloadedWallpaperIDs = try container.decodeIfPresent(Set<String>.self, forKey: .downloadedWallpaperIDs) ?? []
             pending = try container.decodeIfPresent(Bool.self, forKey: .pending) ?? false
             presented = try container.decodeIfPresent(Bool.self, forKey: .presented) ?? false
+            qualifiedAt = try container.decodeIfPresent(Date.self, forKey: .qualifiedAt)
             starChosen = try container.decodeIfPresent(Bool.self, forKey: .starChosen) ?? false
             starPresented = try container.decodeIfPresent(Bool.self, forKey: .starPresented) ?? false
             telemetryAsked = try container.decodeIfPresent(Bool.self, forKey: .telemetryAsked) ?? false
+            batteryAsked = try container.decodeIfPresent(Bool.self, forKey: .batteryAsked) ?? false
             subscriptionsOffered = try container.decodeIfPresent(Bool.self, forKey: .subscriptionsOffered) ?? false
+            discordChosen = try container.decodeIfPresent(Bool.self, forKey: .discordChosen) ?? false
+            discordPresented = try container.decodeIfPresent(Bool.self, forKey: .discordPresented) ?? false
             firstUseAt = try container.decodeIfPresent(Date.self, forKey: .firstUseAt)
             useDays = try container.decodeIfPresent(Int.self, forKey: .useDays) ?? 0
             lastUseDay = try container.decodeIfPresent(Date.self, forKey: .lastUseDay)
@@ -65,6 +108,9 @@ final class SupportPromptStore {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let calendar: Calendar
     private var state: State
+    /// A wallpaper played while the Mac ran on battery at some point since the app started. Kept
+    /// in memory only: a later launch has to see it again.
+    private(set) var batteryUseSeen = false
 
     /// The support prompt is waiting to be shown.
     var isPending: Bool { state.pending && !state.presented }
@@ -86,19 +132,58 @@ final class SupportPromptStore {
 
     /// The prompt to show now, if any. `welcomeSeen` is whether the welcome guide had been
     /// finished; `telemetryOn` whether sending performance data is already on; `steamSignedIn`
-    /// whether a Steam account is signed in for downloads.
+    /// whether a Steam account is signed in for downloads; `battery` what the battery question
+    /// depends on, read only while that question can still come up; `shownSince` when the panel
+    /// window was last shown (nil reads as `now`), which the support offer needs to be at least
+    /// `supportDelay` after the apply that earned it.
     func pendingPrompt(
-        welcomeSeen: Bool, telemetryOn: Bool, steamSignedIn: Bool = false, now: Date = Date()
+        welcomeSeen: Bool, telemetryOn: Bool, steamSignedIn: Bool = false,
+        battery: @autoclosure () -> BatteryFacts = BatteryFacts(), now: Date = Date(),
+        shownSince: Date? = nil
     ) -> Prompt? {
         if let last = state.lastPromptAt, calendar.isDate(last, inSameDayAs: now) { return nil }
         if welcomeSeen, !telemetryOn, !state.telemetryAsked { return .telemetry }
+        if welcomeSeen, !state.batteryAsked, asksAboutBattery(battery()) { return .battery }
         if welcomeSeen, steamSignedIn, !state.subscriptionsOffered { return .subscriptions }
-        if isPending { return .support }
+        if isPending, supportIsDue(shownAt: shownSince ?? now) { return .support }
         if !state.starChosen, !state.starPresented, let first = state.firstUseAt,
            now.timeIntervalSince(first) >= Self.starDelay, state.useDays >= Self.starUseDays {
             return .star
         }
+        if !state.discordChosen, !state.discordPresented, let first = state.firstUseAt,
+           now.timeIntervalSince(first) >= Self.discordDelay, state.useDays >= Self.discordUseDays {
+            return .discord
+        }
         return nil
+    }
+
+    /// The support offer waited long enough: the panel window was shown at least `supportDelay` after
+    /// the apply that earned it. An offer earned before builds recorded that apply is due at once.
+    private func supportIsDue(shownAt: Date) -> Bool {
+        guard let qualifiedAt = state.qualifiedAt else { return true }
+        return shownAt.timeIntervalSince(qualifiedAt) >= Self.supportDelay
+    }
+
+    /// The battery question applies: a Mac with a battery that runs on it now or has with a
+    /// wallpaper playing since launch, a wallpaper playing, and nothing chosen yet.
+    private func asksAboutBattery(_ facts: BatteryFacts) -> Bool {
+        facts.hasBattery && (facts.onBattery || batteryUseSeen) && facts.wallpaperPlaying
+            && facts.keepsRunning
+    }
+
+    /// A wallpaper played while the Mac ran on battery. Lasts until the app quits.
+    func recordBatteryUse() {
+        guard !batteryUseSeen else { return }
+        batteryUseSeen = true
+    }
+
+    /// The battery choices were shown or made elsewhere (the guide's Preferences page, Settings,
+    /// the menu bar), so the question is not needed.
+    func recordBatteryAsked() {
+        guard !state.batteryAsked else { return }
+        var next = state
+        next.batteryAsked = true
+        persist(next)
     }
 
     func recordDownload(wallpaperID: String) {
@@ -109,12 +194,15 @@ final class SupportPromptStore {
         persist(next)
     }
 
-    func recordSuccessfulActivation(wallpaperID: String) {
+    /// A downloaded wallpaper was applied: the support offer is earned, and its wait starts now. A
+    /// later apply does not restart the wait.
+    func recordSuccessfulActivation(wallpaperID: String, now: Date = Date()) {
         guard !wallpaperID.isEmpty, !state.pending, !state.presented,
               state.downloadedWallpaperIDs.contains(wallpaperID) else { return }
         var next = state
         next.downloadedWallpaperIDs.removeAll()
         next.pending = true
+        next.qualifiedAt = now
         persist(next)
     }
 
@@ -136,11 +224,28 @@ final class SupportPromptStore {
         persist(next)
     }
 
+    /// The first-run guide ended, finished or skipped. It was that day's question, so no one-time
+    /// prompt follows it on the same day.
+    func recordWelcomeGuideEnded(now: Date = Date()) {
+        guard state.lastPromptAt.map({ $0 < now }) ?? true else { return }
+        var next = state
+        next.lastPromptAt = now
+        persist(next)
+    }
+
     /// The user chose to star the repository, here or anywhere else that offers it.
     func recordStarChosen() {
         guard !state.starChosen else { return }
         var next = state
         next.starChosen = true
+        persist(next)
+    }
+
+    /// The user opened MMFoundation's Discord invite, here or anywhere else that offers it.
+    func recordDiscordChosen() {
+        guard !state.discordChosen else { return }
+        var next = state
+        next.discordChosen = true
         persist(next)
     }
 
@@ -152,8 +257,8 @@ final class SupportPromptStore {
         persist(next)
     }
 
-    /// The import of the Steam subscriptions was offered, or the person found it: the guide showed
-    /// it, or they signed in to Steam Community. The prompt is then not needed.
+    /// The person found the import of the Steam subscriptions: they signed in to Steam Community.
+    /// The prompt is then not needed.
     func recordSubscriptionsOffered() {
         guard !state.subscriptionsOffered else { return }
         var next = state
@@ -174,9 +279,15 @@ final class SupportPromptStore {
         case .telemetry:
             guard !state.telemetryAsked else { return }
             next.telemetryAsked = true
+        case .battery:
+            guard !state.batteryAsked else { return }
+            next.batteryAsked = true
         case .subscriptions:
             guard !state.subscriptionsOffered else { return }
             next.subscriptionsOffered = true
+        case .discord:
+            guard !state.discordPresented else { return }
+            next.discordPresented = true
         }
         next.lastPromptAt = now
         persist(next)

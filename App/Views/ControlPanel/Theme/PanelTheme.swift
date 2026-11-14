@@ -10,18 +10,41 @@ enum PanelAppearance: Sendable {
 }
 
 /// Everything the panel's look derives from the appearance preferences: the contrast-fitted
-/// accent tokens and the tone's surface tokens for the resolved light or dark appearance.
+/// accent tokens and the tone's surface tokens for the resolved light or dark appearance. While a
+/// season is on, its accent and surfaces stand in for the person's.
 struct PanelTheme: Equatable, Sendable {
   let tone: AppThemePreferences.Tone
   let appearance: PanelAppearance
+  /// The seasonal look the panel wears, nil for the person's own.
+  let season: Season?
   let accent: AccentPalette
   let surface: SurfacePalette
 
-  init(preferences: AppThemePreferences = AppThemePreferences(), appearance: PanelAppearance) {
+  /// How far a control that cannot be used fades: one amount for every button, capsule, link and
+  /// row, so a disabled control reads the same wherever it is (`panelDisabledOpacity(_:)`).
+  static let disabledOpacity: Double = 0.4
+
+  init(
+    preferences: AppThemePreferences = AppThemePreferences(), season: Season? = nil,
+    appearance: PanelAppearance
+  ) {
     tone = preferences.tone
     self.appearance = appearance
-    accent = AccentPalette(accent: preferences.accent, appearance: appearance)
-    surface = SurfacePalette(tone: preferences.tone, appearance: appearance)
+    self.season = season
+    if let season {
+      accent = AccentPalette(accent: season.accent, appearance: appearance)
+      surface = SurfacePalette(season: season, appearance: appearance)
+    } else {
+      accent = AccentPalette(accent: preferences.accent, appearance: appearance)
+      surface = SurfacePalette(tone: preferences.tone, appearance: appearance)
+    }
+  }
+}
+
+extension View {
+  /// Fades the view by `PanelTheme.disabledOpacity` while it cannot be used.
+  func panelDisabledOpacity(_ isEnabled: Bool) -> some View {
+    opacity(isEnabled ? 1 : PanelTheme.disabledOpacity)
   }
 }
 
@@ -35,7 +58,8 @@ extension View {
   /// palettes in `\.panelTheme`, and the formatting locale for literals that localize themselves.
   ///
   /// The root view calls this once. It re-renders its content when the stored accent or tone
-  /// changes, when the language does, and when the resolved appearance flips. It does not
+  /// changes, when a season starts or ends, when the language does, and when the resolved
+  /// appearance flips. It does not
   /// choose light or dark: `AppDelegate` applies the mode through `NSApp.appearance`, the
   /// single writer, and this reads the result from the environment.
   func panelTheme(theme: AppThemeStore, locale: PanelLocale) -> some View {
@@ -50,7 +74,7 @@ private struct PanelThemeModifier: ViewModifier {
 
   func body(content: Content) -> some View {
     let resolved = PanelTheme(
-      preferences: theme.preferences, appearance: PanelAppearance(colorScheme))
+      preferences: theme.preferences, season: theme.season, appearance: PanelAppearance(colorScheme))
     content
       .environment(\.panelTheme, resolved)
       .environment(\.locale, locale.locale)

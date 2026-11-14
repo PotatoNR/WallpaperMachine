@@ -5,16 +5,18 @@ import XCTest
 extension PanelTestCase {
   /// A started panel over `DisplayTransferTestBridge`, which really selects, applies and ejects:
   /// wallpaper `a` on `primary`, `b` on `secondary` and `c` on neither, all installed in the
-  /// fixture's library. `log` collects the store's activation log lines.
+  /// fixture's library. `log` collects the store's activation log lines. `welcomeSeen` is on, as a
+  /// returning user's is, unless a test needs the first-run guide.
   func withApplyingPanel(
-    supportPrompt: SupportPromptStore? = nil,
+    supportPrompt: SupportPromptStore? = nil, welcomeSeen: Bool = true,
     _ body: (PanelFixture, DisplayTransferTestBridge, ReapplyLog) async throws -> Void
   ) async throws {
     let bridge = DisplayTransferTestBridge(noPointer: .init())
     let store = BridgeStore(bridge: bridge, supportPrompt: supportPrompt)
     let log = ReapplyLog()
     store.activationLogWriter = { line, isFailure in log.add(line, isFailure: isFailure) }
-    let panel = try PanelFixture(store: store, bridge: bridge, displayTitles: .renderer)
+    let panel = try PanelFixture(
+      store: store, bridge: bridge, displayTitles: .renderer, welcomeSeen: welcomeSeen)
     do {
       try bridge.installProjects(in: panel.library)
       try await store.refreshAllAsync()
