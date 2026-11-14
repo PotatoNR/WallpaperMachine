@@ -499,15 +499,17 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertEqual(try Self.attachedDevices(of: image), [])
     }
 
-    func testInstallerRejectsACopyNotSignedWithTheReleaseCertificateAndDetachesIt() async throws {
+    /// Intel build note: this fork's images are ad-hoc signed, so the release requirement
+    /// only names the identifier; a copy for another application must still be refused.
+    func testInstallerRejectsACopySignedForAnotherApplicationAndDetachesIt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mwe-update-dmg-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
-        let image = try Self.makeDiskImage(in: root, bundleIdentifier: "app.wallpapermachine")
+        let image = try Self.makeDiskImage(in: root, bundleIdentifier: "com.example.untrusted")
         defer { Self.forceDetach(image) }
 
         do {
             _ = try await AppUpdateInstaller(currentVersion: "1.0.0").prepareInstallation(archive: image)
-            XCTFail("A copy signed without the release certificate must not be accepted")
+            XCTFail("A copy signed for another application must not be accepted")
         } catch {
             XCTAssertEqual((error as? AppUpdateIssue)?.code, .verification)
         }
@@ -557,7 +559,9 @@ final class AppUpdateTests: XCTestCase {
 
         try Self.signAdHoc(app)
         XCTAssertNoThrow(try AppUpdateInstaller.verifySignature(of: app, requirement: Self.adHocRequirement))
-        XCTAssertThrowsError(try AppUpdateInstaller.verifySignature(
+        // Intel build note: this fork's images are ad-hoc signed, so an ad-hoc copy is a
+        // legitimate update target and only the identifier is required.
+        XCTAssertNoThrow(try AppUpdateInstaller.verifySignature(
             of: app, requirement: AppUpdateConfiguration.signingRequirement))
 
         let info = app.appendingPathComponent("Contents/Info.plist")

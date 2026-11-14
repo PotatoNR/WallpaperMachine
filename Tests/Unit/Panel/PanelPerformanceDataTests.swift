@@ -98,7 +98,7 @@ final class PanelPerformanceDataTests: PanelTestCase {
       try panel.controller.openPerformanceDataDetails()
       XCTAssertEqual(
         opened.map(\.absoluteString),
-        ["https://github.com/WallpaperMachine/WallpaperMachine/blob/main/docs/features/telemetry.md"])
+        ["https://github.com/PotatoNR/WallpaperMachine/blob/main/docs/features/telemetry.md"])
     }
   }
 

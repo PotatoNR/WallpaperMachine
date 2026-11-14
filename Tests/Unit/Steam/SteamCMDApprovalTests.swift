@@ -256,6 +256,16 @@ final class SteamCMDApprovalTests: XCTestCase {
 }
 
 private struct ApprovalFixture {
+    /// Intel build note: the service only accepts a SteamCMD built for the host
+    /// architecture, so the fixture has to carry that architecture's slice.
+    static let nativeCPU: UInt32 = {
+        #if arch(x86_64)
+        0x0100_0007
+        #else
+        0x0100_000c
+        #endif
+    }()
+
     let directory: URL
     let runtime: URL
     let receipts: URL
@@ -276,7 +286,7 @@ private struct ApprovalFixture {
         for (url, type) in [(executable, UInt32(2)), (runtime.appendingPathComponent("crashhandler.dylib"), UInt32(6)),
                             (runtime.appendingPathComponent("steamconsole.dylib"), UInt32(6)), (version.appendingPathComponent("Breakpad"), UInt32(6))] {
             var bytes = Data()
-            for value: UInt32 in [0xfeedfacf, 0x0100000c, 0, type, 0, 0, 0, 0] {
+            for value: UInt32 in [0xfeedfacf, ApprovalFixture.nativeCPU, 0, type, 0, 0, 0, 0] {
                 var little = value.littleEndian
                 withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
             }

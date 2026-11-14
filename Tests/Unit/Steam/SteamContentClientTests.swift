@@ -180,7 +180,7 @@ final class SteamContentClientTests: XCTestCase {
     ) async throws -> ScriptedDownload {
         let big = Data((0..<3000).map { UInt8($0 % 251) })
         let small = Data("{\"title\":\"Lucy\"}".utf8)
-        let bigChunks = [big.prefix(1000), big.dropFirst(1000).prefix(1000), big.dropFirst(2000)].map(Data.init)
+        let bigChunks = [big.prefix(1000), big.dropFirst(1000).prefix(1000), big.dropFirst(2000)].map { Data($0) }
         let fetcher = FakeSteamContentFetcher(failingHost: failingHost)
         let manifest = try manifestData(names: ["scene.pkg", "materials", #"materials\project.json"#], encrypted: true,
                                         chunks: [bigChunks.enumerated().map { ($0.element, UInt64($0.offset * 1000)) },
