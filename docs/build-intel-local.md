@@ -1,9 +1,9 @@
 # Intel (x86_64) local build
 
 A build of this tree on an Intel Mac with Xcode 16.4 / SDK 15.5. It is a **local
-developer build**: not a release configuration, not notarized, and built against
-libraries compiled on the same machine. Apple-silicon releases keep using
-[build.md](build.md).
+build**: release-optimised and self-contained, but ad-hoc signed and not notarized,
+and built against libraries compiled on the same machine. Apple-silicon releases keep
+using [build.md](build.md).
 
 ## Toolchain
 
@@ -12,7 +12,7 @@ Everything lives in the ignored `.toolchain/` directory; nothing is installed in
 
 | Path | Contents |
 |---|---|
-| `.toolchain/conda` | Single prefix with the dependencies (eigen, nlohmann-json, freetype, lz4, glslang, vulkan-loader/headers, quickjs-ng, dav1d, FFmpeg) |
+| `.toolchain/conda` | Single prefix with the renderer's dependencies (quickjs-ng 0.18, nlohmann-json, argparse, lz4, libpng, brotli, bzip2, zlib) |
 | `.toolchain/bin` | `xcodegen`, `cmake`, `ninja`, `meson`, `nasm`, a `git` shim for this source snapshot |
 | `.toolchain/homebrew` | Symlink farm shaped like a Homebrew prefix, so `scripts/build.py` finds the dependencies unchanged |
 | `.toolchain/env.sh` | Exports the prefix, Rust toolchain and `PKG_CONFIG_PATH` |
@@ -34,7 +34,9 @@ scripts/intel/make_dmg.sh         # artifacts/intel-release/WallpaperMachine-<ve
 ```
 
 `build.py` builds the renderer with Cargo, regenerates `App/Bridge/Generated/`,
-runs XcodeGen and `xcodebuild`. The packaging script then vendors the non-system
+runs XcodeGen and `xcodebuild`. The script tests need Python 3.11 or newer
+(`hashlib.file_digest`), and the system `/usr/bin/python3` is 3.9 on macOS 15, so
+run the gate as `.toolchain/conda/bin/python3 scripts/test.py`. The packaging script then vendors the non-system
 dylibs into `Contents/Frameworks`, rewrites their install names, adds the Dock icon
 and re-signs the bundle ad-hoc; the result runs from any directory.
 
@@ -63,13 +65,49 @@ relocatable. Without it the renderer fails with `required vulkan instance extens
   process dies with `EXC_BAD_ACCESS`), which crashed SteamCMD validation.
 - Control panel: the macOS 26 glass effects fall back to pre-26 materials, since
   SDK 15.5 has no `glassEffect`/`sharedBackgroundVisibility`.
-- glslang, SPIRV-Tools and quickjs-ng are built from source against the system
-  libc++; the conda-forge glslang links a newer libc++ that exports symbols the
-  system runtime lacks.
+- quickjs-ng is built from source (0.18.0) against the system libc++: the engine
+  calls `JS_IsUncatchableError(value)`, which the older one-argument-free
+  API in 0.10 does not declare. conda-forge packages link a newer libc++ that
+  exports symbols the system runtime lacks, so the shims in `.toolchain/` build
+  against `/usr/bin/clang`.
+- `App/Services/Localization/SystemTranslation.swift`: the macOS 26 branch is
+  wrapped in `#if compiler(>=6.2)`, because the macOS 15 SDK has no declaration
+  for `TranslationSession(installedSource:target:)`; Xcode 16.4 builds always take
+  the panel-session path that macOS 15 uses.
 - `App/Services/GitHub/AppUpdateModels.swift`: the update checker follows this fork's
-  releases (`PotatoNR/WallpaperMachine`), accepts the `v1.5.6-intel.1` tag shape and
+  releases (`PotatoNR/WallpaperMachine`), accepts the `v1.12.0-intel.1` tag shape and
   expects the disk image `scripts/intel/make_dmg.sh` writes,
-  `WallpaperMachine-<version>-intel-x86_64.dmg`.
+  `WallpaperMachine-<version>-intel-x86_64.dmg`. Its `signingRequirement` asks only
+  for the bundle identifier, because these images are ad-hoc signed; upstream's
+  Developer ID requirement stays as `developerIDRequirement` for telemetry.
+
+## Tests on this platform
+
+`scripts/test.py` runs the whole suite; on this Mac (macOS 15.7 on a Radeon Pro 460) a
+number of upstream tests fail for reasons the port does not change. They are kept
+visible rather than skipped, so a regression in the Intel patches still shows up:
+
+- `WebMPlayerTests`, `WebMVideoWallpaperWindowTests`, `WebMOpeningTests`,
+  `WebMFilteredVideoSinkTests`, `VideoFormatSupportTests`: the app decodes VP9 through
+  VideoToolbox, and this GPU reports no VP9 decoder (`VTIsHardwareDecodeSupported` is
+  false), so VP9 WebM files are refused exactly as on any Mac without one. Those
+  wallpapers do not play on this machine.
+- `WebWallpaperErrorStackTests`: the JavaScript stack lines quickjs-ng writes here are
+  one-space indented instead of the four spaces the tests expect; the app's own error
+  formatting is unaffected.
+- `WebWallpaperDeviceLayoutTests`, `ScreenSaverWebSurfaceTests`, `SettingsSearchRenderingTests`,
+  `ShellRenderTests`, `ProgressBarRenderTests`, `SupportPromptPresenterTests`,
+  `PanelSupportPromptTests`, `PixivBrowserRenderTests`, `DesktopWidgetTests`: SwiftUI
+  layout and scroll timing assertions written against macOS 26 behaviour.
+- `EnergyUsageMonitorTests`: the kernel counters this Mac reports do not advance the way
+  the tests expect.
+- `PanelImageViewTests`: on macOS 15 the hosting view's backing layer keeps the last
+  decoded image of a removed row alive; the pixel-release assertions are limited to
+  macOS 26.
+
+Everything else passes. The Intel-specific classes
+(`SteamCMDRuntimeValidationTests`, `SteamCMDApprovalTests`, `SteamCMDSetupTests`,
+`AppUpdateTests`, `PanelImageViewTests`) are green.
 
 ## Known gaps
 
