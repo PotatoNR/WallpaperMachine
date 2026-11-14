@@ -32,6 +32,7 @@ final class SystemTranslation: OnDeviceTranslating {
     func translate(_ text: String, from source: Locale.Language, to target: Locale.Language)
         async throws -> String
     {
+#if compiler(>=6.2)
         guard #available(macOS 26.0, *) else {
             return try await sessionHost.translate(text, from: source, to: target)
         }
@@ -45,6 +46,14 @@ final class SystemTranslation: OnDeviceTranslating {
             installedSessions[key] = nil
             throw error
         }
+#else
+        // Intel build note: `TranslationSession(installedSource:target:)` arrived with the
+        // macOS 26 SDK and has no declaration in the macOS 15 SDK, so Xcode 16.4 cannot
+        // compile that branch at all. Every translation borrows the panel's session instead,
+        // which is what this app does on macOS 15 anyway.
+        _ = installedSessions
+        return try await sessionHost.translate(text, from: source, to: target)
+#endif
     }
 
     func download(from source: Locale.Language, to target: Locale.Language) async throws {
